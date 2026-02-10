@@ -170,12 +170,17 @@ function love.update(dt)
             Lightning.update(dt, players)
         end
 
-        -- Host sends game state to clients
-        if Network.getRole() == Network.ROLE_HOST then
+        -- Network sync: host broadcasts all state, clients send their own state
+        if Network.getRole() ~= Network.ROLE_NONE then
             networkSyncTimer = networkSyncTimer + dt
             if networkSyncTimer >= Network.TICK_RATE then
                 networkSyncTimer = 0
-                sendGameState()
+                if Network.getRole() == Network.ROLE_HOST then
+                    sendGameState()
+                else
+                    -- Client sends local player state to host
+                    sendClientState()
+                end
             end
         end
 
@@ -806,6 +811,19 @@ function processNetworkMessages()
                 applyGameState(data)
             end
 
+        elseif msg.type == "client_state" then
+            -- Host receives a client's player state
+            if Network.getRole() == Network.ROLE_HOST then
+                local data = msg.data
+                if data and data.pid and players[data.pid] and players[data.pid].isRemote then
+                    players[data.pid]:applyNetState({
+                        x = data.x, y = data.y,
+                        vx = data.vx, vy = data.vy,
+                        facingRight = (data.facing == 1)
+                    })
+                end
+            end
+
         elseif msg.type == "player_jump" then
             -- Remote player jumped
             local data = msg.data
@@ -914,6 +932,21 @@ function sendGameState()
         ldata["w" .. i .. "a"] = warning.age
     end
     Network.send("lightning_sync", ldata, false)
+end
+
+-- Client sends its own player state to the host
+function sendClientState()
+    local pid = Network.getLocalPlayerId()
+    local p = players[pid]
+    if not p then return end
+    local state = p:getNetState()
+    Network.send("client_state", {
+        pid = pid,
+        x = state.x, y = state.y,
+        vx = state.vx, vy = state.vy,
+        life = state.life, will = state.will,
+        facing = state.facingRight and 1 or 0
+    }, false)
 end
 
 function applyGameState(data)
