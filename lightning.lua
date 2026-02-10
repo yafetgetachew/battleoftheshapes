@@ -162,7 +162,12 @@ function Lightning.setState(state)
     if state then
         strikes = state.strikes or {}
         warnings = state.warnings or {}
-        nextStrikeTimer = state.nextStrikeTimer or 5
+		-- Default when field is missing (nil)
+		if state.nextStrikeTimer ~= nil then
+			nextStrikeTimer = state.nextStrikeTimer
+		else
+			nextStrikeTimer = 5
+		end
     end
 end
 

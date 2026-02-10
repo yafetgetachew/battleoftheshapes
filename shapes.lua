@@ -100,8 +100,11 @@ function Shapes.drawShape(key, x, y, scale)
     local def = Shapes.definitions[key]
     if not def then return end
     local w, h = def.width * scale, def.height * scale
-    love.graphics.setColor(def.color)
-    def.draw(def, x, y, w, h)
+	-- Preserve caller's color; individual shape draw() functions may change it.
+	local r, g, b, a = love.graphics.getColor()
+	love.graphics.setColor(def.color)
+	def.draw(def, x, y, w, h)
+	love.graphics.setColor(r, g, b, a)
 end
 
 return Shapes

@@ -41,6 +41,17 @@ local GAME_WIDTH = 1280
 local GAME_HEIGHT = 720
 local scaleX, scaleY, offsetX, offsetY = 1, 1, 0, 0
 
+-- Font cache: avoid allocating new Font objects every frame.
+local _fontCache = {}
+local function getFont(size)
+    local f = _fontCache[size]
+    if not f then
+        f = love.graphics.newFont(size)
+        _fontCache[size] = f
+    end
+    return f
+end
+
 -- ─────────────────────────────────────────────
 -- love.load
 -- ─────────────────────────────────────────────
@@ -218,8 +229,7 @@ function love.draw()
         selection:draw(W, H, Config.getControls())
         if serverMode then
             -- Server mode overlay on selection screen
-            local overlayFont = love.graphics.newFont(16)
-            love.graphics.setFont(overlayFont)
+	        love.graphics.setFont(getFont(16))
             love.graphics.setColor(1, 1, 0.4, 0.9)
             love.graphics.printf("SERVER MODE — " .. menuStatus, 0, H - 40, W, "center")
         end
@@ -440,8 +450,7 @@ function drawCountdown(W, H)
     love.graphics.setColor(0, 0, 0, 0.5)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
-    local bigFont = love.graphics.newFont(72)
-    love.graphics.setFont(bigFont)
+	love.graphics.setFont(getFont(72))
     love.graphics.setColor(1, 1, 1, 0.9)
 
     local text = countdownValue > 0 and tostring(countdownValue) or "FIGHT!"
@@ -449,8 +458,7 @@ function drawCountdown(W, H)
 end
 
 function drawControlsHint(W, H)
-    local hintFont = love.graphics.newFont(11)
-    love.graphics.setFont(hintFont)
+	love.graphics.setFont(getFont(11))
     love.graphics.setColor(1, 1, 1, 0.25)
     local pid = Network.getLocalPlayerId()
     local hint = "P" .. pid .. ": A/D move · Space jump · W cast    |    ESC menu"
@@ -458,8 +466,7 @@ function drawControlsHint(W, H)
 end
 
 function drawServerHint(W, H)
-    local hintFont = love.graphics.newFont(11)
-    love.graphics.setFont(hintFont)
+	love.graphics.setFont(getFont(11))
     love.graphics.setColor(1, 1, 0.4, 0.35)
     local connected = Network.getConnectedCount() - 1  -- subtract host itself
     local hint = "SERVER MODE — " .. connected .. "/" .. maxPlayers .. " players    |    ESC menu"
@@ -475,19 +482,16 @@ function drawSplash(W, H)
 
     -- Title with pulsing effect
     local pulse = 0.7 + 0.3 * math.sin(splashTimer * 2.5)
-    local bigFont = love.graphics.newFont(64)
-    love.graphics.setFont(bigFont)
+	love.graphics.setFont(getFont(64))
     love.graphics.setColor(1.0, 0.85, 0.2, pulse)
     love.graphics.printf("BATTLE OF THE SHAPES", 0, H / 2 - 80, W, "center")
 
-    local subFont = love.graphics.newFont(24)
-    love.graphics.setFont(subFont)
+	love.graphics.setFont(getFont(24))
     love.graphics.setColor(0.7, 0.7, 0.9, pulse * 0.8)
     love.graphics.printf("B.O.T.S", 0, H / 2 + 10, W, "center")
 
     if splashTimer > 1.0 then
-        local smallFont = love.graphics.newFont(16)
-        love.graphics.setFont(smallFont)
+	    love.graphics.setFont(getFont(16))
         local blink = 0.4 + 0.6 * math.sin(splashTimer * 4)
         love.graphics.setColor(1, 1, 1, blink)
         love.graphics.printf("Press any key to continue", 0, H / 2 + 80, W, "center")
@@ -523,13 +527,11 @@ function drawMenu(W, H)
     love.graphics.setColor(0.06, 0.06, 0.1)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
-    local titleFont = love.graphics.newFont(42)
-    love.graphics.setFont(titleFont)
+	love.graphics.setFont(getFont(42))
     love.graphics.setColor(1.0, 0.85, 0.2)
     love.graphics.printf("B.O.T.S", 0, 80, W, "center")
 
-    local subFont = love.graphics.newFont(18)
-    love.graphics.setFont(subFont)
+	love.graphics.setFont(getFont(18))
     love.graphics.setColor(0.7, 0.7, 0.9)
     local pc = Config.getPlayerCount()
     local subtitle = "Battle of the Shapes - " .. pc .. " Player LAN"
@@ -538,8 +540,7 @@ function drawMenu(W, H)
     end
     love.graphics.printf(subtitle, 0, 140, W, "center")
 
-    local menuFont = love.graphics.newFont(28)
-    love.graphics.setFont(menuFont)
+	love.graphics.setFont(getFont(28))
     local menuY = 240
     local hostLabel = Config.getServerMode() and "Host Server" or "Host Game"
     local options = {hostLabel, "Join by IP", "Settings"}
@@ -553,8 +554,7 @@ function drawMenu(W, H)
         end
     end
 
-    local hintFont = love.graphics.newFont(14)
-    love.graphics.setFont(hintFont)
+	love.graphics.setFont(getFont(14))
     love.graphics.setColor(0.5, 0.5, 0.5)
     love.graphics.printf("Use ↑/↓ to select, Enter to confirm", 0, H - 60, W, "center")
 end
@@ -600,14 +600,13 @@ function drawSettings(W, H)
     love.graphics.setColor(0.06, 0.06, 0.1)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
-    local titleFont = love.graphics.newFont(36)
-    love.graphics.setFont(titleFont)
+	love.graphics.setFont(getFont(36))
     love.graphics.setColor(1.0, 0.85, 0.2)
     love.graphics.printf("Settings", 0, 80, W, "center")
 
-    local labelFont = love.graphics.newFont(24)
-    local valueFont = love.graphics.newFont(32)
-    local detailFont = love.graphics.newFont(18)
+	local labelFont = getFont(24)
+	local valueFont = getFont(32)
+	local detailFont = getFont(18)
 
     -- Row 1: Control Scheme
     local row1Y = 170
@@ -708,8 +707,7 @@ function drawSettings(W, H)
         love.graphics.printf("Host joins the game as a player", 0, row3Y + 72, W, "center")
     end
 
-    local hintFont = love.graphics.newFont(14)
-    love.graphics.setFont(hintFont)
+	love.graphics.setFont(getFont(14))
     love.graphics.setColor(0.5, 0.5, 0.5)
     love.graphics.printf("↑/↓ select  •  ←/→ change  •  Backspace to go back", 0, H - 60, W, "center")
 end
@@ -718,20 +716,17 @@ function drawConnecting(W, H)
     love.graphics.setColor(0.06, 0.06, 0.1)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
-    local font = love.graphics.newFont(20)
-    love.graphics.setFont(font)
+	love.graphics.setFont(getFont(20))
     love.graphics.setColor(1, 1, 1)
     love.graphics.printf(menuStatus, 0, H / 2 - 60, W, "center")
 
-    local addrFont = love.graphics.newFont(28)
-    love.graphics.setFont(addrFont)
+	love.graphics.setFont(getFont(28))
     love.graphics.setColor(1.0, 1.0, 0.4)
     local display = joinAddress
     if #display == 0 then display = "_" end
     love.graphics.printf(display, 0, H / 2, W, "center")
 
-    local hintFont = love.graphics.newFont(14)
-    love.graphics.setFont(hintFont)
+	love.graphics.setFont(getFont(14))
     love.graphics.setColor(0.5, 0.5, 0.5)
     love.graphics.printf("Backspace to go back to menu", 0, H - 40, W, "center")
 end
@@ -1061,7 +1056,7 @@ function applyGameState(data)
     else
         -- Local player: only apply authoritative life from host
         -- (host computes lightning damage that client can't compute locally)
-        if data.life then
+	        if data.life ~= nil then
             players[pid].life = data.life
         end
     end
@@ -1095,8 +1090,7 @@ function drawGameOver(W, H)
     love.graphics.setColor(0, 0, 0, 0.6)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
-    local bigFont = love.graphics.newFont(56)
-    love.graphics.setFont(bigFont)
+	love.graphics.setFont(getFont(56))
     love.graphics.setColor(1, 1, 0.3)
     if winner and winner > 0 then
         love.graphics.printf("Player " .. winner .. " Wins!", 0, H / 2 - 60, W, "center")
@@ -1104,8 +1098,7 @@ function drawGameOver(W, H)
         love.graphics.printf("Draw!", 0, H / 2 - 60, W, "center")
     end
 
-    local smallFont = love.graphics.newFont(20)
-    love.graphics.setFont(smallFont)
+	love.graphics.setFont(getFont(20))
     love.graphics.setColor(1, 1, 1, 0.7)
     love.graphics.printf("Press R to restart", 0, H / 2 + 20, W, "center")
 end

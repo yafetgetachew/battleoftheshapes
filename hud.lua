@@ -4,6 +4,15 @@
 local Shapes = require("shapes")
 
 local HUD = {}
+-- Cache HUD fonts to avoid allocating new Font objects every frame.
+local _nameFont
+local _statFont
+local function ensureFonts()
+    if _nameFont then return end
+    _nameFont = love.graphics.newFont(14)
+    _statFont = love.graphics.newFont(11)
+end
+
 
 local BAR_WIDTH  = 240
 local BAR_HEIGHT = 18
@@ -26,11 +35,11 @@ function HUD.draw(players, gameWidth)
 end
 
 function HUD.drawPlayerInfo(player, x, y)
+	ensureFonts()
     local def = Shapes.get(player.shapeKey)
     if not def then return end
-
-    local nameFont = love.graphics.newFont(14)
-    local statFont = love.graphics.newFont(11)
+	local nameFont = _nameFont
+	local statFont = _statFont
 
     -- Player name + shape
     love.graphics.setFont(nameFont)

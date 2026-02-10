@@ -5,6 +5,17 @@ local Shapes = require("shapes")
 
 local Selection = {}
 
+-- Cache fonts to avoid allocating every frame.
+local _titleFont
+local _subFont
+local _statsFont
+local function ensureFonts()
+    if _titleFont then return end
+    _titleFont = love.graphics.newFont(32)
+    _subFont = love.graphics.newFont(16)
+    _statsFont = love.graphics.newFont(13)
+end
+
 function Selection.new(localPlayerId, playerCount)
     local self = {}
     self.localPlayerId = localPlayerId or 1
@@ -87,6 +98,7 @@ end
 function Selection:draw(gameWidth, gameHeight, controls)
     local W = gameWidth or 1280
     local H = gameHeight or 720
+	    ensureFonts()
 
     -- Background
     love.graphics.setColor(0.08, 0.08, 0.14)
@@ -94,12 +106,10 @@ function Selection:draw(gameWidth, gameHeight, controls)
 
     -- Title
     love.graphics.setColor(1, 1, 1)
-    local titleFont = love.graphics.newFont(32)
-    love.graphics.setFont(titleFont)
+	    love.graphics.setFont(_titleFont)
     love.graphics.printf("B.O.T.S - Battle of the Shapes", 0, 30, W, "center")
 
-    local subFont = love.graphics.newFont(16)
-    love.graphics.setFont(subFont)
+	    love.graphics.setFont(_subFont)
     love.graphics.setColor(0.7, 0.7, 0.7)
     love.graphics.printf("Select Your Shape", 0, 72, W, "center")
 
@@ -118,9 +128,11 @@ function Selection:draw(gameWidth, gameHeight, controls)
     local leftName = (controls and controls.left) or "A"
     local rightName = (controls and controls.right) or "D"
     local confirmName = (controls and controls.jump) or "Space"
-    labels[self.localPlayerId] = "Player " .. self.localPlayerId .. " (" .. string.upper(leftName) .. "/" .. string.upper(rightName) .. " + " .. string.upper(confirmName) .. ")"
+	    if self.localPlayerId >= 1 and self.localPlayerId <= self.playerCount then
+	        labels[self.localPlayerId] = "Player " .. self.localPlayerId .. " (" .. string.upper(leftName) .. "/" .. string.upper(rightName) .. " + " .. string.upper(confirmName) .. ")"
+	    end
 
-    local statsFont = love.graphics.newFont(13)
+	    local statsFont = _statsFont
 
     for p = 1, self.playerCount do
         local px = startX + (p - 1) * (panelW + gap)

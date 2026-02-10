@@ -146,12 +146,13 @@ end
 
 -- Apply state received from network
 function Player:applyNetState(state)
-    if state.x then self.x = state.x end
-    if state.y then self.y = state.y end
-    if state.vx then self.vx = state.vx end
-    if state.vy then self.vy = state.vy end
-    if state.life then self.life = state.life end
-    if state.will then self.will = state.will end
+	-- NOTE: network fields may legitimately be 0 or false; only treat missing fields as nil.
+    if state.x ~= nil then self.x = state.x end
+    if state.y ~= nil then self.y = state.y end
+    if state.vx ~= nil then self.vx = state.vx end
+    if state.vy ~= nil then self.vy = state.vy end
+    if state.life ~= nil then self.life = state.life end
+    if state.will ~= nil then self.will = state.will end
     if state.facingRight ~= nil then self.facingRight = state.facingRight end
 end
 

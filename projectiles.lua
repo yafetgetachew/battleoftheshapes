@@ -56,20 +56,21 @@ function Projectiles.update(dt, players)
         -- Spawn trail particles
         Projectiles._spawnTrail(p)
 
-        -- Check collision with target player
-        local hit = false
-        for _, player in ipairs(players) do
-            if player.id ~= p.owner then
-                if Projectiles._hitTest(p, player) then
-                    player.life = math.max(0, player.life - Projectiles.DAMAGE)
-                    player.hitFlash = 0.25   -- flash duration
-                    Projectiles._spawnHitEffect(p.x, p.y, p.type)
-                    Sounds.play("fireball_hit")
-                    hit = true
-                    break
-                end
-            end
-        end
+	    -- Check collision with target player
+	    local hit = false
+	    for _, player in ipairs(players) do
+	        -- Ignore dead players so projectiles don't fizzle on corpses / disconnected slots
+	        if player.id ~= p.owner and (player.life or 0) > 0 then
+	            if Projectiles._hitTest(p, player) then
+	                player.life = math.max(0, player.life - Projectiles.DAMAGE)
+	                player.hitFlash = 0.25   -- flash duration
+	                Projectiles._spawnHitEffect(p.x, p.y, p.type)
+	                Sounds.play("fireball_hit")
+	                hit = true
+	                break
+	            end
+	        end
+	    end
 
         -- Remove if hit, or off-screen
         if hit or Projectiles._isOffScreen(p) then
