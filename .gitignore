@@ -1,0 +1,25 @@
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# LÖVE2D build artifacts
+*.love
+*.app
+*.exe
+*.zip
+
+# Temp / logs
+*.log
+*.tmp
+
