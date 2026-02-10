@@ -14,7 +14,8 @@ Network.ROLE_CLIENT = "client"
 
 local role = Network.ROLE_NONE
 local host = nil
-local peers = {}
+local peers = {}          -- playerId -> peer
+local peerToId = {}       -- peer userdata -> playerId (reverse lookup)
 local serverPeer = nil
 local localPlayerId = 1
 local incomingMessages = {}
@@ -92,6 +93,7 @@ function Network.startHost()
         return false, "Failed to create server on port " .. Network.PORT
     end
     peers = {}
+    peerToId = {}
     incomingMessages = {}
     return true
 end
@@ -119,6 +121,7 @@ function Network.stop()
     end
     host = nil
     peers = {}
+    peerToId = {}
     serverPeer = nil
     role = Network.ROLE_NONE
     localPlayerId = 1
@@ -165,7 +168,7 @@ function Network.update(dt)
                 elseif not peers[3] then assignedId = 3 end
                 if assignedId then
                     peers[assignedId] = event.peer
-                    event.peer.playerId = assignedId
+                    peerToId[event.peer] = assignedId
                     local encoded = encodeMessage("assign_id", {id = assignedId})
                     event.peer:send(encoded, 0, "reliable")
                     table.insert(incomingMessages, {type = "player_connected", playerId = assignedId})
@@ -187,17 +190,18 @@ function Network.update(dt)
                     table.insert(incomingMessages, {type = "server_full"})
                 else
                     local fromId = nil
-                    if role == Network.ROLE_HOST and event.peer.playerId then
-                        fromId = event.peer.playerId
+                    if role == Network.ROLE_HOST then
+                        fromId = peerToId[event.peer]
                     end
                     table.insert(incomingMessages, {type = msgType, data = data, fromPlayerId = fromId})
                 end
             end
         elseif event.type == "disconnect" then
             if role == Network.ROLE_HOST then
-                local disconnectedId = event.peer.playerId
+                local disconnectedId = peerToId[event.peer]
                 if disconnectedId then
                     peers[disconnectedId] = nil
+                    peerToId[event.peer] = nil
                     table.insert(incomingMessages, {type = "player_disconnected", playerId = disconnectedId})
                 end
             elseif role == Network.ROLE_CLIENT then
