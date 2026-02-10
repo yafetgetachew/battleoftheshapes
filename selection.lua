@@ -18,28 +18,14 @@ function Selection:keypressed(key)
     local pid = self.localPlayerId
 
     if not self.confirmed[pid] then
-        -- All local players use the same controls for their own panel
-        if pid == 1 then
-            if key == "a" then
-                self.choices[1] = self.choices[1] - 1
-                if self.choices[1] < 1 then self.choices[1] = #Shapes.order end
-            elseif key == "d" then
-                self.choices[1] = self.choices[1] + 1
-                if self.choices[1] > #Shapes.order then self.choices[1] = 1 end
-            elseif key == "space" then
-                self.confirmed[1] = true
-            end
-        else
-            -- Clients use arrow keys
-            if key == "left" then
-                self.choices[pid] = self.choices[pid] - 1
-                if self.choices[pid] < 1 then self.choices[pid] = #Shapes.order end
-            elseif key == "right" then
-                self.choices[pid] = self.choices[pid] + 1
-                if self.choices[pid] > #Shapes.order then self.choices[pid] = 1 end
-            elseif key == "return" then
-                self.confirmed[pid] = true
-            end
+        if key == "a" then
+            self.choices[pid] = self.choices[pid] - 1
+            if self.choices[pid] < 1 then self.choices[pid] = #Shapes.order end
+        elseif key == "d" then
+            self.choices[pid] = self.choices[pid] + 1
+            if self.choices[pid] > #Shapes.order then self.choices[pid] = 1 end
+        elseif key == "space" then
+            self.confirmed[pid] = true
         end
     end
 end
@@ -105,12 +91,8 @@ function Selection:draw()
     local gap = 20
     local totalW = panelW * 3 + gap * 2
     local startX = (W - totalW) / 2
-    local labels = {"Player 1 (A/D + Space)", "Player 2 (Waiting...)", "Player 3 (Waiting...)"}
-    if self.localPlayerId == 2 then
-        labels[2] = "Player 2 (←/→ + Enter)"
-    elseif self.localPlayerId == 3 then
-        labels[3] = "Player 3 (←/→ + Enter)"
-    end
+    local labels = {"Player 1 (Waiting...)", "Player 2 (Waiting...)", "Player 3 (Waiting...)"}
+    labels[self.localPlayerId] = "Player " .. self.localPlayerId .. " (A/D + Space)"
 
     local statsFont = love.graphics.newFont(13)
 

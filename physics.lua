@@ -1,6 +1,8 @@
 -- physics.lua
 -- Handles gravity, ground collision, and player-vs-player collision
 
+local Sounds  = require("sounds")
+
 local Physics = {}
 
 Physics.GRAVITY       = 1200      -- pixels/s²
@@ -90,7 +92,12 @@ function Physics.resolvePlayerCollision(p1, p2, dt)
     -- Apply collision damage to the lower player (higher Y = lower on screen)
     local lowerPlayer = (p1.y > p2.y) and p1 or p2
     if lowerPlayer.life and lowerPlayer.life > 0 then
+        local prevLife = lowerPlayer.life
         lowerPlayer.life = math.max(0, lowerPlayer.life - Physics.COLLISION_DAMAGE * dt)
+        -- Play hurt sound on significant damage ticks (not every frame)
+        if math.floor(prevLife) ~= math.floor(lowerPlayer.life) then
+            Sounds.play("player_hurt")
+        end
     end
 
     -- Resolve along the axis of least penetration

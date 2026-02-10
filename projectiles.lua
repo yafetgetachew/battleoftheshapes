@@ -3,6 +3,7 @@
 -- with particle trails, collision detection, and hit effects
 
 local Physics = require("physics")
+local Sounds  = require("sounds")
 
 local Projectiles = {}
 
@@ -37,6 +38,7 @@ function Projectiles.spawnFireball(caster, target)
         particles = {}
     }
     table.insert(active, proj)
+    Sounds.play("fireball_cast")
     return true
 end
 
@@ -62,6 +64,7 @@ function Projectiles.update(dt, players)
                     player.life = math.max(0, player.life - Projectiles.DAMAGE)
                     player.hitFlash = 0.25   -- flash duration
                     Projectiles._spawnHitEffect(p.x, p.y, p.type)
+                    Sounds.play("fireball_hit")
                     hit = true
                     break
                 end

@@ -2,6 +2,7 @@
 -- Random lightning strike system for B.O.T.S
 
 local Physics = require("physics")
+local Sounds  = require("sounds")
 
 local Lightning = {}
 
@@ -68,6 +69,7 @@ function Lightning._doStrike(x, players)
         segments = Lightning._generateBoltSegments(x)
     }
     table.insert(strikes, bolt)
+    Sounds.play("lightning")
 
     -- Damage players in radius
     if players then
@@ -77,6 +79,7 @@ function Lightning._doStrike(x, players)
                 if dx <= Lightning.STRIKE_RADIUS then
                     player.life = math.max(0, player.life - Lightning.DAMAGE)
                     player.hitFlash = 0.25
+                    Sounds.play("player_hurt")
                 end
             end
         end

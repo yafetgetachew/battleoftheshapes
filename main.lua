@@ -9,6 +9,7 @@ local HUD         = require("hud")
 local Projectiles = require("projectiles")
 local Network     = require("network")
 local Lightning   = require("lightning")
+local Sounds      = require("sounds")
 
 -- Game states: "splash", "menu", "connecting", "selection", "countdown", "playing", "gameover"
 local gameState
@@ -23,6 +24,10 @@ local networkSyncTimer = 0
 local menuChoice = 1       -- 1 = Host, 2 = Join
 local joinAddress = ""
 local menuStatus = ""
+
+-- Lobby browser state
+local lobbyList = {}
+local lobbyChoice = 1
 
 -- Game over
 local winner = nil
@@ -47,6 +52,7 @@ function love.load()
         }
     end
 
+    Sounds.load()
     gameState = "splash"
     splashTimer = 0
 end
@@ -66,6 +72,13 @@ function love.update(dt)
 
     elseif gameState == "menu" then
         -- Nothing to update, handled by keypressed
+
+    elseif gameState == "browsing" then
+        Network.updateDiscovery(dt)
+        lobbyList = Network.getDiscoveredLobbies()
+        if #lobbyList > 0 then
+            lobbyChoice = math.max(1, math.min(lobbyChoice, #lobbyList))
+        end
 
     elseif gameState == "connecting" then
         Network.update(dt)
@@ -164,6 +177,11 @@ function love.draw()
         return
     end
 
+    if gameState == "browsing" then
+        drawLobbyBrowser(W, H)
+        return
+    end
+
     if gameState == "connecting" then
         drawConnecting(W, H)
         return
@@ -228,6 +246,11 @@ function love.keypressed(key)
 
     if gameState == "menu" then
         handleMenuKey(key)
+        return
+    end
+
+    if gameState == "browsing" then
+        handleBrowsingKey(key)
         return
     end
 
@@ -370,13 +393,7 @@ function drawControlsHint(W, H)
     love.graphics.setFont(hintFont)
     love.graphics.setColor(1, 1, 1, 0.25)
     local pid = Network.getLocalPlayerId()
-    local hint = "P" .. pid .. ": "
-    if pid == 1 then
-        hint = hint .. "A/D move · Space jump · W cast"
-    else
-        hint = hint .. "←/→ move · Enter jump · ↑ cast"
-    end
-    hint = hint .. "    |    ESC quit"
+    local hint = "P" .. pid .. ": A/D move · Space jump · W cast    |    ESC quit"
     love.graphics.printf(hint, 0, H - 22, W, "center")
 end
 
@@ -420,20 +437,14 @@ function handleMenuKey(key)
         if menuChoice > 2 then menuChoice = 1 end
     elseif key == "return" or key == "space" then
         if menuChoice == 1 then
-            -- Host game
             startAsHost()
         elseif menuChoice == 2 then
-            -- Join game - switch to address input
-            gameState = "connecting"
-            menuStatus = "Enter host IP address then press Enter:"
-            joinAddress = ""
-        end
-    elseif key == "backspace" then
-        joinAddress = joinAddress:sub(1, -2)
-    else
-        -- Typing IP address characters
-        if #key == 1 and (key:match("[0-9%.]") or key:match("[a-z]")) then
-            joinAddress = joinAddress .. key
+            -- Join game - switch to lobby browser
+            gameState = "browsing"
+            lobbyList = {}
+            lobbyChoice = 1
+            lobbyRefreshTimer = 0
+            Network.startDiscovery()
         end
     end
 end
@@ -492,6 +503,72 @@ function drawConnecting(W, H)
     love.graphics.setFont(hintFont)
     love.graphics.setColor(0.5, 0.5, 0.5)
     love.graphics.printf("Backspace to go back to menu", 0, H - 40, W, "center")
+end
+
+-- ─────────────────────────────────────────────
+-- Lobby Browser
+-- ─────────────────────────────────────────────
+function handleBrowsingKey(key)
+    if key == "up" then
+        lobbyChoice = lobbyChoice - 1
+        if lobbyChoice < 1 then lobbyChoice = math.max(1, #lobbyList) end
+    elseif key == "down" then
+        lobbyChoice = lobbyChoice + 1
+        if lobbyChoice > math.max(1, #lobbyList) then lobbyChoice = 1 end
+    elseif key == "return" or key == "space" then
+        if #lobbyList > 0 and lobbyList[lobbyChoice] then
+            Network.stopDiscovery()
+            startAsClient(lobbyList[lobbyChoice].ip)
+        end
+    elseif key == "backspace" then
+        Network.stopDiscovery()
+        gameState = "menu"
+        menuStatus = ""
+    elseif key == "r" then
+        -- Manual refresh (lobbies auto-refresh, but clear stale ones)
+        lobbyChoice = 1
+    end
+end
+
+function drawLobbyBrowser(W, H)
+    love.graphics.setColor(0.06, 0.06, 0.1)
+    love.graphics.rectangle("fill", 0, 0, W, H)
+
+    local titleFont = love.graphics.newFont(32)
+    love.graphics.setFont(titleFont)
+    love.graphics.setColor(1.0, 0.85, 0.2)
+    love.graphics.printf("LAN Game Browser", 0, 60, W, "center")
+
+    local subFont = love.graphics.newFont(16)
+    love.graphics.setFont(subFont)
+    love.graphics.setColor(0.5, 0.5, 0.7)
+    love.graphics.printf("Searching for games on local network...", 0, 110, W, "center")
+
+    local listFont = love.graphics.newFont(22)
+    love.graphics.setFont(listFont)
+    if #lobbyList == 0 then
+        love.graphics.setColor(0.4, 0.4, 0.4)
+        love.graphics.printf("No games found", 0, H / 2 - 20, W, "center")
+    else
+        local startY = 170
+        for i, lobby in ipairs(lobbyList) do
+            local y = startY + (i - 1) * 50
+            if i == lobbyChoice then
+                love.graphics.setColor(0.15, 0.15, 0.3)
+                love.graphics.rectangle("fill", W/2 - 280, y - 5, 560, 40, 6, 6)
+                love.graphics.setColor(1.0, 1.0, 0.4)
+                love.graphics.printf("> " .. lobby.ip .. "  (" .. lobby.playerCount .. "/3 players) <", 0, y + 5, W, "center")
+            else
+                love.graphics.setColor(0.6, 0.6, 0.6)
+                love.graphics.printf(lobby.ip .. "  (" .. lobby.playerCount .. "/3 players)", 0, y + 5, W, "center")
+            end
+        end
+    end
+
+    local hintFont = love.graphics.newFont(14)
+    love.graphics.setFont(hintFont)
+    love.graphics.setColor(0.5, 0.5, 0.5)
+    love.graphics.printf("↑/↓ select · Enter join · R refresh · Backspace back", 0, H - 40, W, "center")
 end
 
 -- ─────────────────────────────────────────────
@@ -571,7 +648,7 @@ function processNetworkMessages()
             players[3].isRemote = true
             -- Set local player
             players[pid].isRemote = false
-            players[pid].controls = {left = "left", right = "right", jump = "return", cast = "up"}
+            players[pid].controls = {left = "a", right = "d", jump = "space", cast = "w"}
 
             selection = Selection.new(pid)
             gameState = "selection"
@@ -660,6 +737,14 @@ function processNetworkMessages()
                 winner = data.winner
                 gameState = "gameover"
             end
+
+        elseif msg.type == "game_restart" then
+            -- Host told us to restart - go back to selection
+            winner = nil
+            Projectiles.clear()
+            Lightning.reset()
+            selection = Selection.new(Network.getLocalPlayerId())
+            gameState = "selection"
         end
     end
 end
@@ -746,10 +831,23 @@ function getLocalPlayer()
 end
 
 function restartGame()
-    Network.stop()
-    gameState = "menu"
-    players = {}
-    winner = nil
-    menuStatus = ""
-    menuChoice = 1
+    if Network.getRole() == Network.ROLE_NONE then
+        -- Solo / no network: return to menu
+        gameState = "menu"
+        players = {}
+        winner = nil
+        menuStatus = ""
+        menuChoice = 1
+    else
+        -- Networked: stay connected, go back to selection
+        winner = nil
+        Projectiles.clear()
+        Lightning.reset()
+        selection = Selection.new(Network.getLocalPlayerId())
+        gameState = "selection"
+        -- Host tells clients to restart
+        if Network.getRole() == Network.ROLE_HOST then
+            Network.send("game_restart", {}, true)
+        end
+    end
 end

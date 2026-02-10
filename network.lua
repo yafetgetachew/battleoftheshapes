@@ -20,6 +20,14 @@ local serverPeer = nil
 local localPlayerId = 1
 local incomingMessages = {}
 
+-- UDP Discovery / Broadcasting
+local DISCOVERY_PORT = 27016
+local discoverySocket = nil
+local broadcastSocket = nil
+local discoveredLobbies = {}
+local broadcastTimer = 0
+local BROADCAST_INTERVAL = 1.0
+
 local function encodeMessage(msgType, data)
     local parts = {msgType}
     if data then
@@ -95,6 +103,7 @@ function Network.startHost()
     peers = {}
     peerToId = {}
     incomingMessages = {}
+    Network._startBroadcast()
     return true
 end
 
@@ -110,6 +119,8 @@ function Network.startClient(serverAddress)
 end
 
 function Network.stop()
+    Network.stopDiscovery()
+    Network._stopBroadcast()
     if host then
         if role == Network.ROLE_HOST then
             for _, peer in pairs(peers) do peer:disconnect_now() end
@@ -211,6 +222,11 @@ function Network.update(dt)
         end
         event = host:service(0)
     end
+
+    -- Host broadcasts presence on LAN
+    if role == Network.ROLE_HOST then
+        Network._updateBroadcast(dt)
+    end
 end
 
 function Network.getMessages()
@@ -226,6 +242,95 @@ function Network.getHostAddress()
     local ip = s:getsockname()
     s:close()
     return ip or "127.0.0.1"
+end
+
+-- ─────────────────────────────────────────────
+-- UDP Discovery (client-side)
+-- ─────────────────────────────────────────────
+function Network.startDiscovery()
+    local socket = require("socket")
+    discoverySocket = socket.udp()
+    discoverySocket:setsockname("*", DISCOVERY_PORT)
+    discoverySocket:settimeout(0)
+    discoveredLobbies = {}
+end
+
+function Network.stopDiscovery()
+    if discoverySocket then
+        discoverySocket:close()
+        discoverySocket = nil
+    end
+    discoveredLobbies = {}
+end
+
+function Network.updateDiscovery(dt)
+    if not discoverySocket then return end
+    local data, ip, port = discoverySocket:receivefrom()
+    while data do
+        local prefix, hostName, playerCount = data:match("^(BOTS_LOBBY)|(.+)|(%d+)$")
+        if prefix then
+            local found = false
+            for _, lobby in ipairs(discoveredLobbies) do
+                if lobby.ip == ip then
+                    lobby.hostName = hostName
+                    lobby.playerCount = tonumber(playerCount)
+                    lobby.lastSeen = love.timer.getTime()
+                    found = true
+                    break
+                end
+            end
+            if not found then
+                table.insert(discoveredLobbies, {
+                    ip = ip,
+                    hostName = hostName,
+                    playerCount = tonumber(playerCount),
+                    lastSeen = love.timer.getTime()
+                })
+            end
+        end
+        data, ip, port = discoverySocket:receivefrom()
+    end
+    -- Remove stale lobbies (not seen in 5 seconds)
+    local now = love.timer.getTime()
+    for i = #discoveredLobbies, 1, -1 do
+        if now - discoveredLobbies[i].lastSeen > 5 then
+            table.remove(discoveredLobbies, i)
+        end
+    end
+end
+
+function Network.getDiscoveredLobbies()
+    return discoveredLobbies
+end
+
+-- ─────────────────────────────────────────────
+-- UDP Broadcasting (host-side)
+-- ─────────────────────────────────────────────
+function Network._startBroadcast()
+    local socket = require("socket")
+    broadcastSocket = socket.udp()
+    broadcastSocket:setoption("broadcast", true)
+    broadcastSocket:settimeout(0)
+    broadcastTimer = 0
+end
+
+function Network._stopBroadcast()
+    if broadcastSocket then
+        broadcastSocket:close()
+        broadcastSocket = nil
+    end
+end
+
+function Network._updateBroadcast(dt)
+    if not broadcastSocket then return end
+    broadcastTimer = broadcastTimer + dt
+    if broadcastTimer >= BROADCAST_INTERVAL then
+        broadcastTimer = 0
+        local playerCount = Network.getConnectedCount()
+        local hostName = Network.getHostAddress()
+        local msg = "BOTS_LOBBY|" .. hostName .. "|" .. tostring(playerCount)
+        broadcastSocket:sendto(msg, "255.255.255.255", DISCOVERY_PORT)
+    end
 end
 
 return Network
