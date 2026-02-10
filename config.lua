@@ -6,7 +6,8 @@ local Config = {}
 
 -- Default configuration
 local defaultConfig = {
-    controlScheme = "wasd"  -- "wasd" or "arrows"
+    controlScheme = "wasd",  -- "wasd" or "arrows"
+    playerCount = "3"        -- "2" or "3"
 }
 
 -- Current configuration
@@ -83,6 +84,21 @@ end
 function Config.getControls()
     local scheme = Config.getControlScheme()
     return Config.CONTROL_SCHEMES[scheme] or Config.CONTROL_SCHEMES.wasd
+end
+
+-- Get player count (2 or 3)
+function Config.getPlayerCount()
+    local val = tonumber(currentConfig.playerCount)
+    if val == 2 then return 2 end
+    return 3
+end
+
+-- Set player count
+function Config.setPlayerCount(count)
+    if count == 2 or count == 3 then
+        currentConfig.playerCount = tostring(count)
+        Config.save()
+    end
 end
 
 return Config

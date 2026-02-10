@@ -13,22 +13,21 @@ local Sounds      = require("sounds")
 local Config      = require("config")
 
 -- Game states: "splash", "menu", "settings", "connecting", "selection", "countdown", "playing", "gameover"
+-- (Note: "browsing" state was removed - use "Join by IP" instead)
 local gameState
 local selection
-local players = {}         -- {player1, player2, player3}
+local players = {}         -- {player1, player2, ...}
+local maxPlayers = 3       -- 2 or 3, set by host from Config
 local countdownTimer
 local countdownValue
 local splashTimer = 0
 local networkSyncTimer = 0
 
 -- Menu state
-local menuChoice = 1       -- 1 = Host, 2 = Join
+local menuChoice = 1       -- 1 = Host, 2 = Join, 3 = Settings
 local joinAddress = ""
 local menuStatus = ""
-
--- Lobby browser state
-local lobbyList = {}
-local lobbyChoice = 1
+local settingsRow = 1      -- 1 = Control Scheme, 2 = Player Count
 
 -- Game over
 local winner = nil
@@ -108,13 +107,6 @@ function love.update(dt)
 
     elseif gameState == "settings" then
         -- Nothing to update, handled by keypressed
-
-    elseif gameState == "browsing" then
-        Network.updateDiscovery(dt)
-        lobbyList = Network.getDiscoveredLobbies()
-        if #lobbyList > 0 then
-            lobbyChoice = math.max(1, math.min(lobbyChoice, #lobbyList))
-        end
 
     elseif gameState == "connecting" then
         Network.update(dt)
@@ -214,12 +206,10 @@ function love.draw()
         drawMenu(W, H)
     elseif gameState == "settings" then
         drawSettings(W, H)
-    elseif gameState == "browsing" then
-        drawLobbyBrowser(W, H)
     elseif gameState == "connecting" then
         drawConnecting(W, H)
     elseif gameState == "selection" then
-        selection:draw()
+        selection:draw(W, H)
     else
         -- ── Sky gradient ──
         drawBackground(W, H)
@@ -237,10 +227,10 @@ function love.draw()
         Projectiles.draw()
 
         -- ── Lightning ──
-        Lightning.draw()
+        Lightning.draw(W, H)
 
         -- ── HUD ──
-        HUD.draw(players)
+        HUD.draw(players, W)
 
         -- ── Countdown overlay ──
         if gameState == "countdown" then
@@ -284,11 +274,6 @@ function love.keypressed(key)
 
     if gameState == "settings" then
         handleSettingsKey(key)
-        return
-    end
-
-    if gameState == "browsing" then
-        handleBrowsingKey(key)
         return
     end
 
@@ -342,23 +327,35 @@ end
 -- Helper: Transition from selection → countdown
 -- ─────────────────────────────────────────────
 function startCountdown()
-    local shape1, shape2, shape3 = selection:getChoices()
-    players[1]:setShape(shape1)
-    players[2]:setShape(shape2)
-    players[3]:setShape(shape3)
+    local choices = {selection:getChoices()}
+    for i = 1, maxPlayers do
+        players[i]:setShape(choices[i])
+    end
     Projectiles.clear()
 
-    -- Spawn positions (spread across the stage)
-    players[1]:spawn(250, Physics.GROUND_Y - players[1].shapeHeight / 2)
-    players[2]:spawn(640, Physics.GROUND_Y - players[2].shapeHeight / 2)
-    players[3]:spawn(1030, Physics.GROUND_Y - players[3].shapeHeight / 2)
+    -- Spawn positions (spread evenly across the stage)
+    local stageLeft = 250
+    local stageRight = 1030
+    if maxPlayers == 2 then
+        players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
+        players[2]:spawn(stageRight, Physics.GROUND_Y - players[2].shapeHeight / 2)
+    else
+        local stageMiddle = (stageLeft + stageRight) / 2
+        players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
+        players[2]:spawn(stageMiddle, Physics.GROUND_Y - players[2].shapeHeight / 2)
+        players[3]:spawn(stageRight, Physics.GROUND_Y - players[3].shapeHeight / 2)
+    end
 
     countdownTimer = 3.0
     countdownValue = 3
     gameState = "countdown"
 
     if Network.getRole() == Network.ROLE_HOST then
-        Network.send("start_countdown", {s1 = shape1, s2 = shape2, s3 = shape3}, true)
+        local data = {}
+        for i = 1, maxPlayers do
+            data["s" .. i] = choices[i]
+        end
+        Network.send("start_countdown", data, true)
     end
 end
 
@@ -469,26 +466,19 @@ end
 function handleMenuKey(key)
     if key == "up" or key == "w" then
         menuChoice = menuChoice - 1
-        if menuChoice < 1 then menuChoice = 4 end
+        if menuChoice < 1 then menuChoice = 3 end
     elseif key == "down" or key == "s" then
         menuChoice = menuChoice + 1
-        if menuChoice > 4 then menuChoice = 1 end
+        if menuChoice > 3 then menuChoice = 1 end
     elseif key == "return" or key == "space" then
         if menuChoice == 1 then
             startAsHost()
         elseif menuChoice == 2 then
-            -- Browse games - switch to lobby browser
-            gameState = "browsing"
-            lobbyList = {}
-            lobbyChoice = 1
-            lobbyRefreshTimer = 0
-            Network.startDiscovery()
-        elseif menuChoice == 3 then
             -- Join by IP - switch to manual IP entry
             gameState = "connecting"
             menuStatus = "Enter host IP address then press Enter:"
             joinAddress = ""
-        elseif menuChoice == 4 then
+        elseif menuChoice == 3 then
             -- Settings
             gameState = "settings"
         end
@@ -512,7 +502,7 @@ function drawMenu(W, H)
     local menuFont = love.graphics.newFont(28)
     love.graphics.setFont(menuFont)
     local menuY = 240
-    local options = {"Host Game", "Browse Games", "Join by IP", "Settings"}
+    local options = {"Host Game", "Join by IP", "Settings"}
     for i, opt in ipairs(options) do
         if i == menuChoice then
             love.graphics.setColor(1.0, 1.0, 0.4)
@@ -533,13 +523,29 @@ end
 -- Settings Screen
 -- ─────────────────────────────────────────────
 function handleSettingsKey(key)
-    if key == "left" or key == "a" or key == "right" or key == "d" then
-        -- Toggle control scheme
-        local current = Config.getControlScheme()
-        if current == "wasd" then
-            Config.setControlScheme("arrows")
-        else
-            Config.setControlScheme("wasd")
+    if key == "up" or key == "w" then
+        settingsRow = settingsRow - 1
+        if settingsRow < 1 then settingsRow = 2 end
+    elseif key == "down" or key == "s" then
+        settingsRow = settingsRow + 1
+        if settingsRow > 2 then settingsRow = 1 end
+    elseif key == "left" or key == "a" or key == "right" or key == "d" then
+        if settingsRow == 1 then
+            -- Toggle control scheme
+            local current = Config.getControlScheme()
+            if current == "wasd" then
+                Config.setControlScheme("arrows")
+            else
+                Config.setControlScheme("wasd")
+            end
+        elseif settingsRow == 2 then
+            -- Toggle player count
+            local current = Config.getPlayerCount()
+            if current == 2 then
+                Config.setPlayerCount(3)
+            else
+                Config.setPlayerCount(2)
+            end
         end
     elseif key == "backspace" or key == "escape" then
         gameState = "menu"
@@ -556,37 +562,76 @@ function drawSettings(W, H)
     love.graphics.printf("Settings", 0, 80, W, "center")
 
     local labelFont = love.graphics.newFont(24)
-    love.graphics.setFont(labelFont)
-    love.graphics.setColor(0.8, 0.8, 0.8)
-    love.graphics.printf("Control Scheme:", 0, 220, W, "center")
-
     local valueFont = love.graphics.newFont(32)
+    local detailFont = love.graphics.newFont(18)
+
+    -- Row 1: Control Scheme
+    local row1Y = 190
+    love.graphics.setFont(labelFont)
+    if settingsRow == 1 then
+        love.graphics.setColor(1.0, 1.0, 0.4)
+    else
+        love.graphics.setColor(0.6, 0.6, 0.6)
+    end
+    love.graphics.printf("Control Scheme:", 0, row1Y, W, "center")
+
     love.graphics.setFont(valueFont)
     local scheme = Config.getControlScheme()
-    local schemeText = ""
     if scheme == "wasd" then
-        schemeText = "< WASD + Space >"
-        love.graphics.setColor(0.4, 1.0, 0.4)
+        if settingsRow == 1 then
+            love.graphics.setColor(0.4, 1.0, 0.4)
+        else
+            love.graphics.setColor(0.3, 0.7, 0.3)
+        end
+        love.graphics.printf("< WASD + Space >", 0, row1Y + 40, W, "center")
     else
-        schemeText = "< Arrows + Enter >"
-        love.graphics.setColor(0.4, 0.8, 1.0)
+        if settingsRow == 1 then
+            love.graphics.setColor(0.4, 0.8, 1.0)
+        else
+            love.graphics.setColor(0.3, 0.6, 0.7)
+        end
+        love.graphics.printf("< Arrows + Enter >", 0, row1Y + 40, W, "center")
     end
-    love.graphics.printf(schemeText, 0, 270, W, "center")
 
-    -- Show control details
-    local detailFont = love.graphics.newFont(18)
     love.graphics.setFont(detailFont)
-    love.graphics.setColor(0.6, 0.6, 0.6)
+    love.graphics.setColor(0.5, 0.5, 0.5)
     if scheme == "wasd" then
-        love.graphics.printf("Move: A/D  •  Jump: Space  •  Cast: W", 0, 330, W, "center")
+        love.graphics.printf("Move: A/D  •  Jump: Space  •  Cast: W", 0, row1Y + 85, W, "center")
     else
-        love.graphics.printf("Move: ←/→  •  Jump: Enter  •  Cast: ↑", 0, 330, W, "center")
+        love.graphics.printf("Move: ←/→  •  Jump: Enter  •  Cast: ↑", 0, row1Y + 85, W, "center")
+    end
+
+    -- Row 2: Player Count
+    local row2Y = 340
+    love.graphics.setFont(labelFont)
+    if settingsRow == 2 then
+        love.graphics.setColor(1.0, 1.0, 0.4)
+    else
+        love.graphics.setColor(0.6, 0.6, 0.6)
+    end
+    love.graphics.printf("Player Count:", 0, row2Y, W, "center")
+
+    love.graphics.setFont(valueFont)
+    local pc = Config.getPlayerCount()
+    if settingsRow == 2 then
+        love.graphics.setColor(1.0, 0.85, 0.2)
+    else
+        love.graphics.setColor(0.7, 0.6, 0.2)
+    end
+    love.graphics.printf("< " .. pc .. " Players >", 0, row2Y + 40, W, "center")
+
+    love.graphics.setFont(detailFont)
+    love.graphics.setColor(0.5, 0.5, 0.5)
+    if pc == 2 then
+        love.graphics.printf("1v1 duel mode", 0, row2Y + 85, W, "center")
+    else
+        love.graphics.printf("3-player free-for-all", 0, row2Y + 85, W, "center")
     end
 
     local hintFont = love.graphics.newFont(14)
     love.graphics.setFont(hintFont)
     love.graphics.setColor(0.5, 0.5, 0.5)
-    love.graphics.printf("Use ←/→ to change  •  Backspace to go back", 0, H - 60, W, "center")
+    love.graphics.printf("↑/↓ select  •  ←/→ change  •  Backspace to go back", 0, H - 60, W, "center")
 end
 
 function drawConnecting(W, H)
@@ -611,86 +656,23 @@ function drawConnecting(W, H)
     love.graphics.printf("Backspace to go back to menu", 0, H - 40, W, "center")
 end
 
--- ─────────────────────────────────────────────
--- Lobby Browser
--- ─────────────────────────────────────────────
-function handleBrowsingKey(key)
-    if key == "up" then
-        lobbyChoice = lobbyChoice - 1
-        if lobbyChoice < 1 then lobbyChoice = math.max(1, #lobbyList) end
-    elseif key == "down" then
-        lobbyChoice = lobbyChoice + 1
-        if lobbyChoice > math.max(1, #lobbyList) then lobbyChoice = 1 end
-    elseif key == "return" or key == "space" then
-        if #lobbyList > 0 and lobbyList[lobbyChoice] then
-            Network.stopDiscovery()
-            startAsClient(lobbyList[lobbyChoice].ip)
-        end
-    elseif key == "backspace" then
-        Network.stopDiscovery()
-        gameState = "menu"
-        menuStatus = ""
-    elseif key == "r" then
-        -- Manual refresh (lobbies auto-refresh, but clear stale ones)
-        lobbyChoice = 1
-    end
-end
-
-function drawLobbyBrowser(W, H)
-    love.graphics.setColor(0.06, 0.06, 0.1)
-    love.graphics.rectangle("fill", 0, 0, W, H)
-
-    local titleFont = love.graphics.newFont(32)
-    love.graphics.setFont(titleFont)
-    love.graphics.setColor(1.0, 0.85, 0.2)
-    love.graphics.printf("LAN Game Browser", 0, 60, W, "center")
-
-    local subFont = love.graphics.newFont(16)
-    love.graphics.setFont(subFont)
-    love.graphics.setColor(0.5, 0.5, 0.7)
-    love.graphics.printf("Searching for games on local network...", 0, 110, W, "center")
-
-    local listFont = love.graphics.newFont(22)
-    love.graphics.setFont(listFont)
-    if #lobbyList == 0 then
-        love.graphics.setColor(0.4, 0.4, 0.4)
-        love.graphics.printf("No games found", 0, H / 2 - 20, W, "center")
-    else
-        local startY = 170
-        for i, lobby in ipairs(lobbyList) do
-            local y = startY + (i - 1) * 50
-            if i == lobbyChoice then
-                love.graphics.setColor(0.15, 0.15, 0.3)
-                love.graphics.rectangle("fill", W/2 - 280, y - 5, 560, 40, 6, 6)
-                love.graphics.setColor(1.0, 1.0, 0.4)
-                love.graphics.printf("> " .. lobby.ip .. "  (" .. lobby.playerCount .. "/3 players) <", 0, y + 5, W, "center")
-            else
-                love.graphics.setColor(0.6, 0.6, 0.6)
-                love.graphics.printf(lobby.ip .. "  (" .. lobby.playerCount .. "/3 players)", 0, y + 5, W, "center")
-            end
-        end
-    end
-
-    local hintFont = love.graphics.newFont(14)
-    love.graphics.setFont(hintFont)
-    love.graphics.setColor(0.5, 0.5, 0.5)
-    love.graphics.printf("↑/↓ select · Enter join · R refresh · Backspace back", 0, H - 40, W, "center")
-end
 
 -- ─────────────────────────────────────────────
 -- Networking: start as host or client
 -- ─────────────────────────────────────────────
 function startAsHost()
-    local ok, err = Network.startHost()
+    maxPlayers = Config.getPlayerCount()
+    local ok, err = Network.startHost(maxPlayers)
     if ok then
-        -- Create all 3 players; host is P1
+        -- Create players; host is P1
+        players = {}
         players[1] = Player.new(1, Config.getControls())
-        players[2] = Player.new(2, nil)
-        players[2].isRemote = true
-        players[3] = Player.new(3, nil)
-        players[3].isRemote = true
+        for i = 2, maxPlayers do
+            players[i] = Player.new(i, nil)
+            players[i].isRemote = true
+        end
 
-        selection = Selection.new(1)
+        selection = Selection.new(1, maxPlayers)
         gameState = "selection"
         menuStatus = "Hosting on " .. Network.getHostAddress() .. ":" .. Network.PORT
     else
@@ -744,19 +726,19 @@ function processNetworkMessages()
             menuStatus = "Player " .. msg.playerId .. " connected"
 
         elseif msg.type == "id_assigned" then
-            -- Client received their player ID
+            -- Client received their player ID and max player count
             local pid = msg.playerId
-            players[1] = Player.new(1, nil)
-            players[1].isRemote = true
-            players[2] = Player.new(2, nil)
-            players[2].isRemote = true
-            players[3] = Player.new(3, nil)
-            players[3].isRemote = true
+            maxPlayers = msg.maxPlayers or 3
+            players = {}
+            for i = 1, maxPlayers do
+                players[i] = Player.new(i, nil)
+                players[i].isRemote = true
+            end
             -- Set local player
             players[pid].isRemote = false
             players[pid].controls = Config.getControls()
 
-            selection = Selection.new(pid)
+            selection = Selection.new(pid, maxPlayers)
             gameState = "selection"
 
         elseif msg.type == "server_full" then
@@ -797,13 +779,21 @@ function processNetworkMessages()
             -- Client received countdown start from host
             local data = msg.data
             if data then
-                players[1]:setShape(data.s1)
-                players[2]:setShape(data.s2)
-                players[3]:setShape(data.s3)
+                for i = 1, maxPlayers do
+                    players[i]:setShape(data["s" .. i])
+                end
                 Projectiles.clear()
-                players[1]:spawn(250, Physics.GROUND_Y - players[1].shapeHeight / 2)
-                players[2]:spawn(640, Physics.GROUND_Y - players[2].shapeHeight / 2)
-                players[3]:spawn(1030, Physics.GROUND_Y - players[3].shapeHeight / 2)
+                local stageLeft = 250
+                local stageRight = 1030
+                if maxPlayers == 2 then
+                    players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
+                    players[2]:spawn(stageRight, Physics.GROUND_Y - players[2].shapeHeight / 2)
+                else
+                    local stageMiddle = (stageLeft + stageRight) / 2
+                    players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
+                    players[2]:spawn(stageMiddle, Physics.GROUND_Y - players[2].shapeHeight / 2)
+                    players[3]:spawn(stageRight, Physics.GROUND_Y - players[3].shapeHeight / 2)
+                end
                 countdownTimer = 3.0
                 countdownValue = 3
                 gameState = "countdown"
@@ -849,65 +839,47 @@ function processNetworkMessages()
             winner = nil
             Projectiles.clear()
             Lightning.reset()
-            selection = Selection.new(Network.getLocalPlayerId())
+            selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
             gameState = "selection"
 
-        elseif msg.type == "lightning_state" then
-            -- Client receives lightning state metadata from host
+        elseif msg.type == "lightning_sync" then
+            -- Client receives consolidated lightning state from host
             if Network.getRole() == Network.ROLE_CLIENT then
                 local data = msg.data
                 if data then
-                    -- Initialize temporary state holders
-                    if not _tempLightningStrikes then _tempLightningStrikes = {} end
-                    if not _tempLightningWarnings then _tempLightningWarnings = {} end
-                    _tempLightningStrikeCount = data.strikeCount or 0
-                    _tempLightningWarningCount = data.warningCount or 0
-                    _tempLightningNextTimer = data.nextTimer or 5
-                end
-            end
-
-        elseif msg.type == "lightning_strike" then
-            -- Client receives individual strike data
-            if Network.getRole() == Network.ROLE_CLIENT then
-                local data = msg.data
-                if data and data.idx then
-                    if not _tempLightningStrikes then _tempLightningStrikes = {} end
-                    _tempLightningStrikes[data.idx] = {
-                        x = data.x,
-                        age = data.age,
-                        segments = Lightning.generateBoltSegments(data.x)
-                    }
-                end
-            end
-
-        elseif msg.type == "lightning_warning" then
-            -- Client receives individual warning data
-            if Network.getRole() == Network.ROLE_CLIENT then
-                local data = msg.data
-                if data and data.idx then
-                    if not _tempLightningWarnings then _tempLightningWarnings = {} end
-                    _tempLightningWarnings[data.idx] = {
-                        x = data.x,
-                        age = data.age
-                    }
+                    local strikes = {}
+                    local warnings = {}
+                    local sc = data.sc or 0
+                    local wc = data.wc or 0
+                    for i = 1, sc do
+                        local sx = data["s" .. i .. "x"]
+                        local sa = data["s" .. i .. "a"]
+                        if sx then
+                            strikes[i] = {
+                                x = sx,
+                                age = sa or 0,
+                                segments = Lightning.generateBoltSegments(sx)
+                            }
+                        end
+                    end
+                    for i = 1, wc do
+                        local wx = data["w" .. i .. "x"]
+                        local wa = data["w" .. i .. "a"]
+                        if wx then
+                            warnings[i] = {
+                                x = wx,
+                                age = wa or 0
+                            }
+                        end
+                    end
+                    Lightning.setState({
+                        strikes = strikes,
+                        warnings = warnings,
+                        nextStrikeTimer = data.nt or 5
+                    })
                 end
             end
         end
-    end
-
-    -- Apply accumulated lightning state (clients only)
-    if Network.getRole() == Network.ROLE_CLIENT and _tempLightningStrikeCount then
-        Lightning.setState({
-            strikes = _tempLightningStrikes or {},
-            warnings = _tempLightningWarnings or {},
-            nextStrikeTimer = _tempLightningNextTimer or 5
-        })
-        -- Clear temp data
-        _tempLightningStrikes = nil
-        _tempLightningWarnings = nil
-        _tempLightningStrikeCount = nil
-        _tempLightningWarningCount = nil
-        _tempLightningNextTimer = nil
     end
 end
 
@@ -926,31 +898,22 @@ function sendGameState()
         }, false)
     end
 
-    -- Send lightning state to clients
+    -- Send lightning state to clients (single consolidated message)
     local lightningState = Lightning.getState()
-    Network.send("lightning_state", {
-        strikeCount = #lightningState.strikes,
-        warningCount = #lightningState.warnings,
-        nextTimer = lightningState.nextStrikeTimer
-    }, false)
-
-    -- Send detailed strike data if any active
+    local ldata = {
+        sc = #lightningState.strikes,
+        wc = #lightningState.warnings,
+        nt = lightningState.nextStrikeTimer
+    }
     for i, strike in ipairs(lightningState.strikes) do
-        Network.send("lightning_strike", {
-            idx = i,
-            x = strike.x,
-            age = strike.age
-        }, false)
+        ldata["s" .. i .. "x"] = strike.x
+        ldata["s" .. i .. "a"] = strike.age
     end
-
-    -- Send warning data if any active
     for i, warning in ipairs(lightningState.warnings) do
-        Network.send("lightning_warning", {
-            idx = i,
-            x = warning.x,
-            age = warning.age
-        }, false)
+        ldata["w" .. i .. "x"] = warning.x
+        ldata["w" .. i .. "a"] = warning.age
     end
+    Network.send("lightning_sync", ldata, false)
 end
 
 function applyGameState(data)
@@ -1031,7 +994,7 @@ function restartGame()
         winner = nil
         Projectiles.clear()
         Lightning.reset()
-        selection = Selection.new(Network.getLocalPlayerId())
+        selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
         gameState = "selection"
         -- Host tells clients to restart
         if Network.getRole() == Network.ROLE_HOST then

@@ -1,15 +1,20 @@
 -- selection.lua
--- Shape selection screen for 3 players (networked)
+-- Shape selection screen for 2 or 3 players (networked)
 
 local Shapes = require("shapes")
 
 local Selection = {}
 
-function Selection.new(localPlayerId)
+function Selection.new(localPlayerId, playerCount)
     local self = {}
     self.localPlayerId = localPlayerId or 1
-    self.choices    = {1, 1, 1}        -- current index for each player (1-based)
-    self.confirmed  = {false, false, false}
+    self.playerCount = playerCount or 3
+    self.choices    = {}
+    self.confirmed  = {}
+    for i = 1, self.playerCount do
+        self.choices[i] = 1
+        self.confirmed[i] = false
+    end
     self.timer      = 0                -- animation timer
     return setmetatable(self, {__index = Selection})
 end
@@ -32,14 +37,14 @@ end
 
 -- Called when a remote player's choice is received over the network
 function Selection:setRemoteChoice(playerId, choiceIndex)
-    if playerId >= 1 and playerId <= 3 then
+    if playerId >= 1 and playerId <= self.playerCount then
         self.choices[playerId] = choiceIndex
     end
 end
 
 -- Called when a remote player confirms over the network
 function Selection:setRemoteConfirmed(playerId, shapeIndex)
-    if playerId >= 1 and playerId <= 3 then
+    if playerId >= 1 and playerId <= self.playerCount then
         self.choices[playerId] = shapeIndex
         self.confirmed[playerId] = true
     end
@@ -50,11 +55,18 @@ function Selection:update(dt)
 end
 
 function Selection:isDone()
-    return self.confirmed[1] and self.confirmed[2] and self.confirmed[3]
+    for i = 1, self.playerCount do
+        if not self.confirmed[i] then return false end
+    end
+    return true
 end
 
 function Selection:getChoices()
-    return Shapes.order[self.choices[1]], Shapes.order[self.choices[2]], Shapes.order[self.choices[3]]
+    local choices = {}
+    for i = 1, self.playerCount do
+        choices[i] = Shapes.order[self.choices[i]]
+    end
+    return unpack(choices)
 end
 
 function Selection:getLocalChoice()
@@ -65,9 +77,9 @@ function Selection:isLocalConfirmed()
     return self.confirmed[self.localPlayerId]
 end
 
-function Selection:draw()
-    local W = love.graphics.getWidth()
-    local H = love.graphics.getHeight()
+function Selection:draw(gameWidth, gameHeight)
+    local W = gameWidth or 1280
+    local H = gameHeight or 720
 
     -- Background
     love.graphics.setColor(0.08, 0.08, 0.14)
@@ -84,19 +96,22 @@ function Selection:draw()
     love.graphics.setColor(0.7, 0.7, 0.7)
     love.graphics.printf("Select Your Shape", 0, 72, W, "center")
 
-    -- Draw panels for each player (3 across)
-    local panelW = 370
+    -- Draw panels for each player
+    local panelW = self.playerCount == 2 and 450 or 370
     local panelH = 420
     local panelY = 110
     local gap = 20
-    local totalW = panelW * 3 + gap * 2
+    local totalW = panelW * self.playerCount + gap * (self.playerCount - 1)
     local startX = (W - totalW) / 2
-    local labels = {"Player 1 (Waiting...)", "Player 2 (Waiting...)", "Player 3 (Waiting...)"}
+    local labels = {}
+    for i = 1, self.playerCount do
+        labels[i] = "Player " .. i .. " (Waiting...)"
+    end
     labels[self.localPlayerId] = "Player " .. self.localPlayerId .. " (A/D + Space)"
 
     local statsFont = love.graphics.newFont(13)
 
-    for p = 1, 3 do
+    for p = 1, self.playerCount do
         local px = startX + (p - 1) * (panelW + gap)
         -- Panel background
         love.graphics.setColor(0.12, 0.12, 0.22, 0.9)

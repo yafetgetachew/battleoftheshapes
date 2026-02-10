@@ -104,7 +104,7 @@ end
 -- Public version for network sync
 Lightning.generateBoltSegments = Lightning._generateBoltSegments
 
-function Lightning.draw()
+function Lightning.draw(gameWidth, gameHeight)
     -- Draw warnings (pulsing circle on ground)
     for _, w in ipairs(warnings) do
         local pulse = 0.5 + 0.5 * math.sin(w.age * 12)
@@ -124,7 +124,7 @@ function Lightning.draw()
 
         -- Screen flash (subtle)
         love.graphics.setColor(1, 1, 1, alpha * 0.08)
-        love.graphics.rectangle("fill", 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
+        love.graphics.rectangle("fill", 0, 0, gameWidth or 1280, gameHeight or 720)
 
         -- Bolt glow (thick, faint)
         love.graphics.setColor(0.6, 0.6, 1.0, alpha * 0.3)

@@ -118,9 +118,15 @@ function Player:castAbilityAtNearest(allPlayers)
 end
 
 function Player:update(dt)
-    if not self.isRemote then
-        self:handleInput(dt)
+    if self.isRemote then
+        -- Remote players: position comes from network, only update cosmetics
+        if self.hitFlash > 0 then
+            self.hitFlash = self.hitFlash - dt
+        end
+        return
     end
+
+    self:handleInput(dt)
     Physics.updatePlayer(self, dt)
 
     -- Passive will regeneration

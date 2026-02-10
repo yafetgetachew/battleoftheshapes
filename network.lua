@@ -19,15 +19,9 @@ local peerToId = {}       -- peer userdata -> playerId (reverse lookup)
 local serverPeer = nil
 local localPlayerId = 1
 local incomingMessages = {}
+local maxPlayers = 3      -- set by host on startHost()
 
--- UDP Discovery / Broadcasting
-local DISCOVERY_PORT = 27016
-local discoverySocket = nil
-local broadcastSocket = nil
-local subnetBroadcast = "255.255.255.255"
-local discoveredLobbies = {}
-local broadcastTimer = 0
-local BROADCAST_INTERVAL = 1.0
+
 
 local function encodeMessage(msgType, data)
     local parts = {msgType}
@@ -94,18 +88,22 @@ function Network.getConnectedCount()
     return 0
 end
 
-function Network.startHost()
+function Network.startHost(playerCount)
+    maxPlayers = playerCount or 3
     role = Network.ROLE_HOST
     localPlayerId = 1
-    host = enet.host_create("*:" .. Network.PORT, 3, 2)
+    host = enet.host_create("*:" .. Network.PORT, maxPlayers, 2)
     if not host then
         return false, "Failed to create server on port " .. Network.PORT
     end
     peers = {}
     peerToId = {}
     incomingMessages = {}
-    Network._startBroadcast()
     return true
+end
+
+function Network.getMaxPlayers()
+    return maxPlayers
 end
 
 function Network.startClient(serverAddress)
@@ -120,8 +118,6 @@ function Network.startClient(serverAddress)
 end
 
 function Network.stop()
-    Network.stopDiscovery()
-    Network._stopBroadcast()
     if host then
         if role == Network.ROLE_HOST then
             for _, peer in pairs(peers) do peer:disconnect_now() end
@@ -176,12 +172,13 @@ function Network.update(dt)
         if event.type == "connect" then
             if role == Network.ROLE_HOST then
                 local assignedId = nil
-                if not peers[2] then assignedId = 2
-                elseif not peers[3] then assignedId = 3 end
+                for pid = 2, maxPlayers do
+                    if not peers[pid] then assignedId = pid; break end
+                end
                 if assignedId then
                     peers[assignedId] = event.peer
                     peerToId[event.peer] = assignedId
-                    local encoded = encodeMessage("assign_id", {id = assignedId})
+                    local encoded = encodeMessage("assign_id", {id = assignedId, maxPlayers = maxPlayers})
                     event.peer:send(encoded, 0, "reliable")
                     table.insert(incomingMessages, {type = "player_connected", playerId = assignedId})
                 else
@@ -197,7 +194,8 @@ function Network.update(dt)
             if msgType then
                 if role == Network.ROLE_CLIENT and msgType == "assign_id" then
                     localPlayerId = data.id
-                    table.insert(incomingMessages, {type = "id_assigned", playerId = data.id})
+                    maxPlayers = data.maxPlayers or 3
+                    table.insert(incomingMessages, {type = "id_assigned", playerId = data.id, maxPlayers = data.maxPlayers or 3})
                 elseif role == Network.ROLE_CLIENT and msgType == "server_full" then
                     table.insert(incomingMessages, {type = "server_full"})
                 else
@@ -224,10 +222,6 @@ function Network.update(dt)
         event = host:service(0)
     end
 
-    -- Host broadcasts presence on LAN
-    if role == Network.ROLE_HOST then
-        Network._updateBroadcast(dt)
-    end
 end
 
 function Network.getMessages()
@@ -243,118 +237,6 @@ function Network.getHostAddress()
     local ip = s:getsockname()
     s:close()
     return ip or "127.0.0.1"
-end
-
--- ─────────────────────────────────────────────
--- UDP Discovery (client-side)
--- ─────────────────────────────────────────────
-function Network.startDiscovery()
-    local socket = require("socket")
-    discoverySocket = socket.udp()
-    discoverySocket:setoption("reuseaddr", true)
-    discoverySocket:setsockname("*", DISCOVERY_PORT)
-    discoverySocket:settimeout(0)
-    discoveredLobbies = {}
-end
-
-function Network.stopDiscovery()
-    if discoverySocket then
-        discoverySocket:close()
-        discoverySocket = nil
-    end
-    discoveredLobbies = {}
-end
-
-function Network.updateDiscovery(dt)
-    if not discoverySocket then return end
-    local data, ip, port = discoverySocket:receivefrom()
-    while data do
-        -- Match pattern: BOTS_LOBBY|hostname|playercount
-        local parts = {}
-        for part in data:gmatch("[^|]+") do
-            table.insert(parts, part)
-        end
-        if #parts == 3 and parts[1] == "BOTS_LOBBY" then
-            local prefix = parts[1]
-            local hostName = parts[2]
-            local playerCount = tonumber(parts[3])
-            local found = false
-            for _, lobby in ipairs(discoveredLobbies) do
-                if lobby.ip == ip then
-                    lobby.hostName = hostName
-                    lobby.playerCount = tonumber(playerCount)
-                    lobby.lastSeen = love.timer.getTime()
-                    found = true
-                    break
-                end
-            end
-            if not found then
-                table.insert(discoveredLobbies, {
-                    ip = ip,
-                    hostName = hostName,
-                    playerCount = tonumber(playerCount),
-                    lastSeen = love.timer.getTime()
-                })
-            end
-        end
-        data, ip, port = discoverySocket:receivefrom()
-    end
-    -- Remove stale lobbies (not seen in 5 seconds)
-    local now = love.timer.getTime()
-    for i = #discoveredLobbies, 1, -1 do
-        if now - discoveredLobbies[i].lastSeen > 5 then
-            table.remove(discoveredLobbies, i)
-        end
-    end
-end
-
-function Network.getDiscoveredLobbies()
-    return discoveredLobbies
-end
-
--- ─────────────────────────────────────────────
--- UDP Broadcasting (host-side)
--- ─────────────────────────────────────────────
-function Network._startBroadcast()
-    local socket = require("socket")
-    broadcastSocket = socket.udp()
-    broadcastSocket:setoption("broadcast", true)
-    broadcastSocket:setoption("reuseaddr", true)
-    broadcastSocket:settimeout(0)
-    broadcastTimer = 0
-    -- Compute subnet broadcast address (e.g. 192.168.1.255)
-    local ip = Network.getHostAddress()
-    local a, b, c = ip:match("^(%d+)%.(%d+)%.(%d+)%.")
-    if a then
-        subnetBroadcast = a .. "." .. b .. "." .. c .. ".255"
-    else
-        subnetBroadcast = "255.255.255.255"
-    end
-end
-
-function Network._stopBroadcast()
-    if broadcastSocket then
-        broadcastSocket:close()
-        broadcastSocket = nil
-    end
-end
-
-function Network._updateBroadcast(dt)
-    if not broadcastSocket then return end
-    broadcastTimer = broadcastTimer + dt
-    if broadcastTimer >= BROADCAST_INTERVAL then
-        broadcastTimer = 0
-        local playerCount = Network.getConnectedCount()
-        local hostName = Network.getHostAddress()
-        local msg = "BOTS_LOBBY|" .. hostName .. "|" .. tostring(playerCount)
-        -- Send to global broadcast, subnet broadcast, and loopback for same-machine testing
-        broadcastSocket:sendto(msg, "255.255.255.255", DISCOVERY_PORT)
-        if subnetBroadcast ~= "255.255.255.255" then
-            broadcastSocket:sendto(msg, subnetBroadcast, DISCOVERY_PORT)
-        end
-        -- Also send directly to loopback for same-machine testing
-        broadcastSocket:sendto(msg, "127.0.0.1", DISCOVERY_PORT)
-    end
 end
 
 return Network

@@ -1,5 +1,5 @@
 -- hud.lua
--- Heads-Up Display: health bars, will bars, player info (3-player)
+-- Heads-Up Display: health bars, will bars, player info
 
 local Shapes = require("shapes")
 
@@ -11,11 +11,12 @@ local WILL_HEIGHT = 10
 local MARGIN     = 20
 local TOP_Y      = 14
 
--- Draw HUD for all players. Accepts a table {player1, player2, player3}
-function HUD.draw(players)
-    local W = love.graphics.getWidth()
+-- Draw HUD for all players
+function HUD.draw(players, gameWidth)
+    local W = gameWidth or 1280
+    local count = #players
     local gap = 20
-    local totalW = BAR_WIDTH * 3 + gap * 2
+    local totalW = BAR_WIDTH * count + gap * (count - 1)
     local startX = (W - totalW) / 2
 
     for i, player in ipairs(players) do
