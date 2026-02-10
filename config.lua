@@ -7,7 +7,8 @@ local Config = {}
 -- Default configuration
 local defaultConfig = {
     controlScheme = "wasd",  -- "wasd" or "arrows"
-    playerCount = "3"        -- "2" or "3"
+    playerCount = "3",       -- "2" or "3"
+    serverMode = "false"     -- "true" or "false" (dedicated server / relay mode)
 }
 
 -- Current configuration
@@ -99,6 +100,17 @@ function Config.setPlayerCount(count)
         currentConfig.playerCount = tostring(count)
         Config.save()
     end
+end
+
+-- Get server mode (dedicated relay)
+function Config.getServerMode()
+    return currentConfig.serverMode == "true"
+end
+
+-- Set server mode
+function Config.setServerMode(enabled)
+    currentConfig.serverMode = enabled and "true" or "false"
+    Config.save()
 end
 
 return Config

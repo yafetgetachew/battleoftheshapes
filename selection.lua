@@ -21,6 +21,8 @@ end
 
 function Selection:keypressed(key, controls)
     local pid = self.localPlayerId
+    if pid < 1 then return end  -- spectator (server mode) can't browse
+
     local leftKey = (controls and controls.left) or "a"
     local rightKey = (controls and controls.right) or "d"
     local confirmKey = (controls and controls.jump) or "space"
@@ -73,10 +75,12 @@ function Selection:getChoices()
 end
 
 function Selection:getLocalChoice()
+    if self.localPlayerId < 1 then return 1 end  -- spectator
     return self.choices[self.localPlayerId]
 end
 
 function Selection:isLocalConfirmed()
+    if self.localPlayerId < 1 then return true end  -- spectator is always "ready"
     return self.confirmed[self.localPlayerId]
 end
 

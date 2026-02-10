@@ -20,6 +20,7 @@ local serverPeer = nil
 local localPlayerId = 1
 local incomingMessages = {}
 local maxPlayers = 3      -- set by host on startHost()
+local dedicatedServer = false  -- true = host is relay only, no local player
 
 
 
@@ -88,11 +89,14 @@ function Network.getConnectedCount()
     return 0
 end
 
-function Network.startHost(playerCount)
+function Network.startHost(playerCount, isServerMode)
     maxPlayers = playerCount or 3
+    dedicatedServer = isServerMode or false
     role = Network.ROLE_HOST
-    localPlayerId = 1
-    host = enet.host_create("*:" .. Network.PORT, maxPlayers, 2)
+    localPlayerId = dedicatedServer and 0 or 1  -- 0 means no local player
+    -- In server mode, all maxPlayers slots are for clients
+    local maxConnections = dedicatedServer and maxPlayers or maxPlayers
+    host = enet.host_create("*:" .. Network.PORT, maxConnections, 2)
     if not host then
         return false, "Failed to create server on port " .. Network.PORT
     end
@@ -104,6 +108,10 @@ end
 
 function Network.getMaxPlayers()
     return maxPlayers
+end
+
+function Network.isDedicatedServer()
+    return dedicatedServer
 end
 
 function Network.startClient(serverAddress)
@@ -133,6 +141,7 @@ function Network.stop()
     serverPeer = nil
     role = Network.ROLE_NONE
     localPlayerId = 1
+    dedicatedServer = false
     incomingMessages = {}
 end
 
@@ -172,7 +181,8 @@ function Network.update(dt)
         if event.type == "connect" then
             if role == Network.ROLE_HOST then
                 local assignedId = nil
-                for pid = 2, maxPlayers do
+                local startId = dedicatedServer and 1 or 2
+                for pid = startId, maxPlayers do
                     if not peers[pid] then assignedId = pid; break end
                 end
                 if assignedId then

@@ -27,7 +27,8 @@ local networkSyncTimer = 0
 local menuChoice = 1       -- 1 = Host, 2 = Join, 3 = Settings
 local joinAddress = ""
 local menuStatus = ""
-local settingsRow = 1      -- 1 = Control Scheme, 2 = Player Count
+local settingsRow = 1      -- 1 = Control Scheme, 2 = Player Count, 3 = Server Mode
+local serverMode = false   -- true = dedicated server (host is relay only)
 
 -- Game over
 local winner = nil
@@ -117,8 +118,8 @@ function love.update(dt)
         processNetworkMessages()
         selection:update(dt)
 
-        -- Host broadcasts selection state periodically
-        if Network.getRole() == Network.ROLE_HOST then
+        -- Host broadcasts selection state periodically (only if playing, not in server mode)
+        if Network.getRole() == Network.ROLE_HOST and not serverMode then
             networkSyncTimer = networkSyncTimer + dt
             if networkSyncTimer >= 0.1 then
                 networkSyncTimer = 0
@@ -215,6 +216,13 @@ function love.draw()
         drawConnecting(W, H)
     elseif gameState == "selection" then
         selection:draw(W, H, Config.getControls())
+        if serverMode then
+            -- Server mode overlay on selection screen
+            local overlayFont = love.graphics.newFont(16)
+            love.graphics.setFont(overlayFont)
+            love.graphics.setColor(1, 1, 0.4, 0.9)
+            love.graphics.printf("SERVER MODE — " .. menuStatus, 0, H - 40, W, "center")
+        end
     else
         -- ── Sky gradient ──
         drawBackground(W, H)
@@ -249,7 +257,11 @@ function love.draw()
 
         -- ── Controls hint ──
         if gameState == "playing" then
-            drawControlsHint(W, H)
+            if serverMode then
+                drawServerHint(W, H)
+            else
+                drawControlsHint(W, H)
+            end
         end
     end
 
@@ -262,8 +274,14 @@ end
 -- ─────────────────────────────────────────────
 function love.keypressed(key)
     if key == "escape" then
-        Network.stop()
-        love.event.quit()
+        if gameState == "menu" then
+            -- Quit from menu
+            Network.stop()
+            love.event.quit()
+        else
+            -- Return to main menu from any other state
+            returnToMenu()
+        end
         return
     end
 
@@ -288,17 +306,19 @@ function love.keypressed(key)
     end
 
     if gameState == "selection" then
-        local prevChoice = selection:getLocalChoice()
-        local prevConfirmed = selection:isLocalConfirmed()
-        selection:keypressed(key, Config.getControls())
+        if not serverMode then
+            local prevChoice = selection:getLocalChoice()
+            local prevConfirmed = selection:isLocalConfirmed()
+            selection:keypressed(key, Config.getControls())
 
-        -- Send selection changes over network
-        local newChoice = selection:getLocalChoice()
-        local newConfirmed = selection:isLocalConfirmed()
-        local pid = Network.getLocalPlayerId()
+            -- Send selection changes over network
+            local newChoice = selection:getLocalChoice()
+            local newConfirmed = selection:isLocalConfirmed()
+            local pid = Network.getLocalPlayerId()
 
-        if newConfirmed and not prevConfirmed then
-            Network.send("sel_confirm", {pid = pid, idx = newChoice}, true)
+            if newConfirmed and not prevConfirmed then
+                Network.send("sel_confirm", {pid = pid, idx = newChoice}, true)
+            end
         end
         return
     end
@@ -433,7 +453,16 @@ function drawControlsHint(W, H)
     love.graphics.setFont(hintFont)
     love.graphics.setColor(1, 1, 1, 0.25)
     local pid = Network.getLocalPlayerId()
-    local hint = "P" .. pid .. ": A/D move · Space jump · W cast    |    ESC quit"
+    local hint = "P" .. pid .. ": A/D move · Space jump · W cast    |    ESC menu"
+    love.graphics.printf(hint, 0, H - 22, W, "center")
+end
+
+function drawServerHint(W, H)
+    local hintFont = love.graphics.newFont(11)
+    love.graphics.setFont(hintFont)
+    love.graphics.setColor(1, 1, 0.4, 0.35)
+    local connected = Network.getConnectedCount() - 1  -- subtract host itself
+    local hint = "SERVER MODE — " .. connected .. "/" .. maxPlayers .. " players    |    ESC menu"
     love.graphics.printf(hint, 0, H - 22, W, "center")
 end
 
@@ -502,12 +531,18 @@ function drawMenu(W, H)
     local subFont = love.graphics.newFont(18)
     love.graphics.setFont(subFont)
     love.graphics.setColor(0.7, 0.7, 0.9)
-    love.graphics.printf("Battle of the Shapes - 3 Player LAN", 0, 140, W, "center")
+    local pc = Config.getPlayerCount()
+    local subtitle = "Battle of the Shapes - " .. pc .. " Player LAN"
+    if Config.getServerMode() then
+        subtitle = subtitle .. " (Server Mode)"
+    end
+    love.graphics.printf(subtitle, 0, 140, W, "center")
 
     local menuFont = love.graphics.newFont(28)
     love.graphics.setFont(menuFont)
     local menuY = 240
-    local options = {"Host Game", "Join by IP", "Settings"}
+    local hostLabel = Config.getServerMode() and "Host Server" or "Host Game"
+    local options = {hostLabel, "Join by IP", "Settings"}
     for i, opt in ipairs(options) do
         if i == menuChoice then
             love.graphics.setColor(1.0, 1.0, 0.4)
@@ -528,12 +563,13 @@ end
 -- Settings Screen
 -- ─────────────────────────────────────────────
 function handleSettingsKey(key)
+    local maxRows = 3
     if key == "up" or key == "w" then
         settingsRow = settingsRow - 1
-        if settingsRow < 1 then settingsRow = 2 end
+        if settingsRow < 1 then settingsRow = maxRows end
     elseif key == "down" or key == "s" then
         settingsRow = settingsRow + 1
-        if settingsRow > 2 then settingsRow = 1 end
+        if settingsRow > maxRows then settingsRow = 1 end
     elseif key == "left" or key == "a" or key == "right" or key == "d" then
         if settingsRow == 1 then
             -- Toggle control scheme
@@ -551,8 +587,11 @@ function handleSettingsKey(key)
             else
                 Config.setPlayerCount(2)
             end
+        elseif settingsRow == 3 then
+            -- Toggle server mode
+            Config.setServerMode(not Config.getServerMode())
         end
-    elseif key == "backspace" or key == "escape" then
+    elseif key == "backspace" then
         gameState = "menu"
     end
 end
@@ -571,7 +610,7 @@ function drawSettings(W, H)
     local detailFont = love.graphics.newFont(18)
 
     -- Row 1: Control Scheme
-    local row1Y = 190
+    local row1Y = 170
     love.graphics.setFont(labelFont)
     if settingsRow == 1 then
         love.graphics.setColor(1.0, 1.0, 0.4)
@@ -588,26 +627,26 @@ function drawSettings(W, H)
         else
             love.graphics.setColor(0.3, 0.7, 0.3)
         end
-        love.graphics.printf("< WASD + Space >", 0, row1Y + 40, W, "center")
+        love.graphics.printf("< WASD + Space >", 0, row1Y + 35, W, "center")
     else
         if settingsRow == 1 then
             love.graphics.setColor(0.4, 0.8, 1.0)
         else
             love.graphics.setColor(0.3, 0.6, 0.7)
         end
-        love.graphics.printf("< Arrows + Enter >", 0, row1Y + 40, W, "center")
+        love.graphics.printf("< Arrows + Enter >", 0, row1Y + 35, W, "center")
     end
 
     love.graphics.setFont(detailFont)
     love.graphics.setColor(0.5, 0.5, 0.5)
     if scheme == "wasd" then
-        love.graphics.printf("Move: A/D  •  Jump: Space  •  Cast: W", 0, row1Y + 85, W, "center")
+        love.graphics.printf("Move: A/D  •  Jump: Space  •  Cast: W", 0, row1Y + 72, W, "center")
     else
-        love.graphics.printf("Move: ←/→  •  Jump: Enter  •  Cast: ↑", 0, row1Y + 85, W, "center")
+        love.graphics.printf("Move: ←/→  •  Jump: Enter  •  Cast: ↑", 0, row1Y + 72, W, "center")
     end
 
     -- Row 2: Player Count
-    local row2Y = 340
+    local row2Y = 305
     love.graphics.setFont(labelFont)
     if settingsRow == 2 then
         love.graphics.setColor(1.0, 1.0, 0.4)
@@ -623,14 +662,50 @@ function drawSettings(W, H)
     else
         love.graphics.setColor(0.7, 0.6, 0.2)
     end
-    love.graphics.printf("< " .. pc .. " Players >", 0, row2Y + 40, W, "center")
+    love.graphics.printf("< " .. pc .. " Players >", 0, row2Y + 35, W, "center")
 
     love.graphics.setFont(detailFont)
     love.graphics.setColor(0.5, 0.5, 0.5)
     if pc == 2 then
-        love.graphics.printf("1v1 duel mode", 0, row2Y + 85, W, "center")
+        love.graphics.printf("1v1 duel mode", 0, row2Y + 72, W, "center")
     else
-        love.graphics.printf("3-player free-for-all", 0, row2Y + 85, W, "center")
+        love.graphics.printf("3-player free-for-all", 0, row2Y + 72, W, "center")
+    end
+
+    -- Row 3: Server Mode
+    local row3Y = 440
+    love.graphics.setFont(labelFont)
+    if settingsRow == 3 then
+        love.graphics.setColor(1.0, 1.0, 0.4)
+    else
+        love.graphics.setColor(0.6, 0.6, 0.6)
+    end
+    love.graphics.printf("Server Mode:", 0, row3Y, W, "center")
+
+    love.graphics.setFont(valueFont)
+    local sm = Config.getServerMode()
+    if sm then
+        if settingsRow == 3 then
+            love.graphics.setColor(0.4, 1.0, 0.4)
+        else
+            love.graphics.setColor(0.3, 0.7, 0.3)
+        end
+        love.graphics.printf("< ON >", 0, row3Y + 35, W, "center")
+    else
+        if settingsRow == 3 then
+            love.graphics.setColor(1.0, 0.5, 0.4)
+        else
+            love.graphics.setColor(0.7, 0.4, 0.3)
+        end
+        love.graphics.printf("< OFF >", 0, row3Y + 35, W, "center")
+    end
+
+    love.graphics.setFont(detailFont)
+    love.graphics.setColor(0.5, 0.5, 0.5)
+    if sm then
+        love.graphics.printf("Host is relay only — does not play", 0, row3Y + 72, W, "center")
+    else
+        love.graphics.printf("Host joins the game as a player", 0, row3Y + 72, W, "center")
     end
 
     local hintFont = love.graphics.newFont(14)
@@ -667,19 +742,31 @@ end
 -- ─────────────────────────────────────────────
 function startAsHost()
     maxPlayers = Config.getPlayerCount()
-    local ok, err = Network.startHost(maxPlayers)
+    serverMode = Config.getServerMode()
+    local ok, err = Network.startHost(maxPlayers, serverMode)
     if ok then
-        -- Create players; host is P1
         players = {}
-        players[1] = Player.new(1, Config.getControls())
-        for i = 2, maxPlayers do
-            players[i] = Player.new(i, nil)
-            players[i].isRemote = true
+        if serverMode then
+            -- Dedicated server: all players are remote clients
+            for i = 1, maxPlayers do
+                players[i] = Player.new(i, nil)
+                players[i].isRemote = true
+            end
+            -- No local selection — host just waits
+            selection = Selection.new(0, maxPlayers)  -- pid 0 = spectator
+            gameState = "selection"
+            menuStatus = "Server mode on " .. Network.getHostAddress() .. ":" .. Network.PORT .. " (waiting for " .. maxPlayers .. " players)"
+        else
+            -- Normal mode: host is P1
+            players[1] = Player.new(1, Config.getControls())
+            for i = 2, maxPlayers do
+                players[i] = Player.new(i, nil)
+                players[i].isRemote = true
+            end
+            selection = Selection.new(1, maxPlayers)
+            gameState = "selection"
+            menuStatus = "Hosting on " .. Network.getHostAddress() .. ":" .. Network.PORT
         end
-
-        selection = Selection.new(1, maxPlayers)
-        gameState = "selection"
-        menuStatus = "Hosting on " .. Network.getHostAddress() .. ":" .. Network.PORT
     else
         menuStatus = "Error: " .. tostring(err)
     end
@@ -728,7 +815,12 @@ function processNetworkMessages()
     for _, msg in ipairs(messages) do
         if msg.type == "player_connected" then
             -- A new client connected (host only)
-            menuStatus = "Player " .. msg.playerId .. " connected"
+            local connected = Network.getConnectedCount() - 1  -- subtract host
+            if serverMode then
+                menuStatus = "Server mode on " .. Network.getHostAddress() .. ":" .. Network.PORT .. " (" .. connected .. "/" .. maxPlayers .. " players)"
+            else
+                menuStatus = "Player " .. msg.playerId .. " connected (" .. connected .. "/" .. maxPlayers .. ")"
+            end
 
         elseif msg.type == "id_assigned" then
             -- Client received their player ID and max player count
@@ -1021,7 +1113,23 @@ end
 -- ─────────────────────────────────────────────
 -- Utility helpers
 -- ─────────────────────────────────────────────
+function returnToMenu()
+    Network.stop()
+    players = {}
+    selection = nil
+    winner = nil
+    Projectiles.clear()
+    Lightning.reset()
+    gameState = "menu"
+    menuStatus = ""
+    menuChoice = 1
+    joinAddress = ""
+    networkSyncTimer = 0
+    serverMode = false
+end
+
 function getLocalPlayer()
+    if serverMode then return nil end
     local pid = Network.getLocalPlayerId()
     return players[pid]
 end
