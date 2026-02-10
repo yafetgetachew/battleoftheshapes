@@ -19,17 +19,20 @@ function Selection.new(localPlayerId, playerCount)
     return setmetatable(self, {__index = Selection})
 end
 
-function Selection:keypressed(key)
+function Selection:keypressed(key, controls)
     local pid = self.localPlayerId
+    local leftKey = (controls and controls.left) or "a"
+    local rightKey = (controls and controls.right) or "d"
+    local confirmKey = (controls and controls.jump) or "space"
 
     if not self.confirmed[pid] then
-        if key == "a" then
+        if key == leftKey then
             self.choices[pid] = self.choices[pid] - 1
             if self.choices[pid] < 1 then self.choices[pid] = #Shapes.order end
-        elseif key == "d" then
+        elseif key == rightKey then
             self.choices[pid] = self.choices[pid] + 1
             if self.choices[pid] > #Shapes.order then self.choices[pid] = 1 end
-        elseif key == "space" then
+        elseif key == confirmKey then
             self.confirmed[pid] = true
         end
     end
@@ -77,7 +80,7 @@ function Selection:isLocalConfirmed()
     return self.confirmed[self.localPlayerId]
 end
 
-function Selection:draw(gameWidth, gameHeight)
+function Selection:draw(gameWidth, gameHeight, controls)
     local W = gameWidth or 1280
     local H = gameHeight or 720
 
@@ -107,7 +110,11 @@ function Selection:draw(gameWidth, gameHeight)
     for i = 1, self.playerCount do
         labels[i] = "Player " .. i .. " (Waiting...)"
     end
-    labels[self.localPlayerId] = "Player " .. self.localPlayerId .. " (A/D + Space)"
+    -- Show actual configured controls
+    local leftName = (controls and controls.left) or "A"
+    local rightName = (controls and controls.right) or "D"
+    local confirmName = (controls and controls.jump) or "Space"
+    labels[self.localPlayerId] = "Player " .. self.localPlayerId .. " (" .. string.upper(leftName) .. "/" .. string.upper(rightName) .. " + " .. string.upper(confirmName) .. ")"
 
     local statsFont = love.graphics.newFont(13)
 

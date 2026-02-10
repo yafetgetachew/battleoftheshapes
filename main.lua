@@ -214,7 +214,7 @@ function love.draw()
     elseif gameState == "connecting" then
         drawConnecting(W, H)
     elseif gameState == "selection" then
-        selection:draw(W, H)
+        selection:draw(W, H, Config.getControls())
     else
         -- ── Sky gradient ──
         drawBackground(W, H)
@@ -290,7 +290,7 @@ function love.keypressed(key)
     if gameState == "selection" then
         local prevChoice = selection:getLocalChoice()
         local prevConfirmed = selection:isLocalConfirmed()
-        selection:keypressed(key)
+        selection:keypressed(key, Config.getControls())
 
         -- Send selection changes over network
         local newChoice = selection:getLocalChoice()
@@ -767,6 +767,10 @@ function processNetworkMessages()
             local data = msg.data
             if data and data.pid and data.idx then
                 selection:setRemoteChoice(data.pid, data.idx)
+                -- Host relays to other clients
+                if Network.getRole() == Network.ROLE_HOST then
+                    Network.relay(data.pid, "sel_browse", data, false)
+                end
             end
 
         elseif msg.type == "sel_confirm" then
@@ -953,14 +957,22 @@ function applyGameState(data)
     if not data.pid then return end
     local pid = data.pid
     if not players[pid] then return end
-    -- Only apply state for remote players (don't override local prediction)
-    if not players[pid].isRemote then return end
-    players[pid]:applyNetState({
-        x = data.x, y = data.y,
-        vx = data.vx, vy = data.vy,
-        life = data.life, will = data.will,
-        facingRight = (data.facing == 1)
-    })
+
+    if players[pid].isRemote then
+        -- Remote players: apply full state from host
+        players[pid]:applyNetState({
+            x = data.x, y = data.y,
+            vx = data.vx, vy = data.vy,
+            life = data.life, will = data.will,
+            facingRight = (data.facing == 1)
+        })
+    else
+        -- Local player: only apply authoritative life from host
+        -- (host computes lightning damage that client can't compute locally)
+        if data.life then
+            players[pid].life = data.life
+        end
+    end
 end
 
 -- ─────────────────────────────────────────────

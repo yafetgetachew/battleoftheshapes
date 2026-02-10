@@ -16,7 +16,7 @@ Player.ABILITY_MAP = {
     rectangle = "fireball",
 }
 
-Player.WILL_REGEN = 1   -- will points recovered per second
+Player.WILL_REGEN = 10  -- will points recovered per second
 
 function Player.new(id, controls)
     local self = setmetatable({}, Player)
@@ -119,9 +119,13 @@ end
 
 function Player:update(dt)
     if self.isRemote then
-        -- Remote players: position comes from network, only update cosmetics
+        -- Remote players: position comes from network, only update cosmetics + will regen
         if self.hitFlash > 0 then
             self.hitFlash = self.hitFlash - dt
+        end
+        -- Will regen so host has accurate will values to broadcast
+        if self.will < self.maxWill then
+            self.will = math.min(self.maxWill, self.will + Player.WILL_REGEN * dt)
         end
         return
     end
