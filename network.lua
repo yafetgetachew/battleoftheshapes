@@ -24,6 +24,7 @@ local incomingMessages = {}
 local DISCOVERY_PORT = 27016
 local discoverySocket = nil
 local broadcastSocket = nil
+local subnetBroadcast = "255.255.255.255"
 local discoveredLobbies = {}
 local broadcastTimer = 0
 local BROADCAST_INTERVAL = 1.0
@@ -267,7 +268,7 @@ function Network.updateDiscovery(dt)
     if not discoverySocket then return end
     local data, ip, port = discoverySocket:receivefrom()
     while data do
-        local prefix, hostName, playerCount = data:match("^(BOTS_LOBBY)|(.+)|(%d+)$")
+        local prefix, hostName, playerCount = data:match("^(BOTS_LOBBY)|([^|]+)|(%d+)$")
         if prefix then
             local found = false
             for _, lobby in ipairs(discoveredLobbies) do
@@ -312,6 +313,14 @@ function Network._startBroadcast()
     broadcastSocket:setoption("broadcast", true)
     broadcastSocket:settimeout(0)
     broadcastTimer = 0
+    -- Compute subnet broadcast address (e.g. 192.168.1.255)
+    local ip = Network.getHostAddress()
+    local a, b, c = ip:match("^(%d+)%.(%d+)%.(%d+)%.")
+    if a then
+        subnetBroadcast = a .. "." .. b .. "." .. c .. ".255"
+    else
+        subnetBroadcast = "255.255.255.255"
+    end
 end
 
 function Network._stopBroadcast()
@@ -329,7 +338,11 @@ function Network._updateBroadcast(dt)
         local playerCount = Network.getConnectedCount()
         local hostName = Network.getHostAddress()
         local msg = "BOTS_LOBBY|" .. hostName .. "|" .. tostring(playerCount)
+        -- Send to both global and subnet broadcast for macOS compatibility
         broadcastSocket:sendto(msg, "255.255.255.255", DISCOVERY_PORT)
+        if subnetBroadcast ~= "255.255.255.255" then
+            broadcastSocket:sendto(msg, subnetBroadcast, DISCOVERY_PORT)
+        end
     end
 end
 

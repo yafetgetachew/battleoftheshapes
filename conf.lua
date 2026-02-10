@@ -3,6 +3,8 @@ function love.conf(t)
     t.version = "11.4"
     t.window.width = 1280
     t.window.height = 720
+    t.window.fullscreen = true
+    t.window.fullscreentype = "desktop"
     t.window.resizable = false
     t.window.vsync = 1
     t.modules.audio = true

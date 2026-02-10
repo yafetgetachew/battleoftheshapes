@@ -431,20 +431,25 @@ end
 function handleMenuKey(key)
     if key == "up" or key == "w" then
         menuChoice = menuChoice - 1
-        if menuChoice < 1 then menuChoice = 2 end
+        if menuChoice < 1 then menuChoice = 3 end
     elseif key == "down" or key == "s" then
         menuChoice = menuChoice + 1
-        if menuChoice > 2 then menuChoice = 1 end
+        if menuChoice > 3 then menuChoice = 1 end
     elseif key == "return" or key == "space" then
         if menuChoice == 1 then
             startAsHost()
         elseif menuChoice == 2 then
-            -- Join game - switch to lobby browser
+            -- Browse games - switch to lobby browser
             gameState = "browsing"
             lobbyList = {}
             lobbyChoice = 1
             lobbyRefreshTimer = 0
             Network.startDiscovery()
+        elseif menuChoice == 3 then
+            -- Join by IP - switch to manual IP entry
+            gameState = "connecting"
+            menuStatus = "Enter host IP address then press Enter:"
+            joinAddress = ""
         end
     end
 end
@@ -466,7 +471,7 @@ function drawMenu(W, H)
     local menuFont = love.graphics.newFont(28)
     love.graphics.setFont(menuFont)
     local menuY = 260
-    local options = {"Host Game", "Join Game"}
+    local options = {"Host Game", "Browse Games", "Join by IP"}
     for i, opt in ipairs(options) do
         if i == menuChoice then
             love.graphics.setColor(1.0, 1.0, 0.4)
