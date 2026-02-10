@@ -786,7 +786,7 @@ end
 function love.textinput(text)
     if gameState == "connecting" and not Network.isConnected() then
         -- Allow typing IP address
-        if text:match("[0-9%.a-zA-Z]") then
+        if text:match("[0-9%.a-zA-Z:]") then
             joinAddress = joinAddress .. text
         end
     end

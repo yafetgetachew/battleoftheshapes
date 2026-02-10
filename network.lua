@@ -120,7 +120,13 @@ function Network.startClient(serverAddress)
     if not host then
         return false, "Failed to create client"
     end
-    serverPeer = host:connect(serverAddress .. ":" .. Network.PORT, 2)
+    -- Support ip:port format; default to Network.PORT if no port given
+    local addr, port = serverAddress:match("^(.+):(%d+)$")
+    if not addr then
+        addr = serverAddress
+        port = Network.PORT
+    end
+    serverPeer = host:connect(addr .. ":" .. port, 2)
     incomingMessages = {}
     return true
 end
