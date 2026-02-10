@@ -75,9 +75,31 @@ That's it. That's the whole thing. You're welcome.
 
 1. Launch the game on another computer on the same LAN
 2. Admire the splash screen (we worked hard on it)
-3. Select **"Join by IP"** and enter the host's IP address
+3. Select **"Join by IP"** and enter the host's IP address (e.g. `192.168.1.5` or `192.168.1.5:27020` for a custom port)
 4. Press `Enter` to connect
 5. Pick your shape and prepare for TOTAL SHAPE WARFARE
+
+### Running a Dedicated Server (Headless)
+
+Don't want to waste a perfectly good game window on hosting? Run a headless dedicated server from the command line — works on a VPS too:
+
+```bash
+# Default: 3 players, port 27015
+love server/
+
+# 2-player game on a custom port
+love server/ --players 2 --port 27020
+```
+
+The server acts purely as a relay — it runs all authoritative game logic (physics, lightning, damage) but has no local player. All player slots go to connecting clients. Games auto-restart 5 seconds after someone wins.
+
+**Requirements**: Just LÖVE2D installed. No display server needed — all graphics/audio modules are disabled.
+
+**Options**:
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--players 2\|3` | Number of player slots | `3` |
+| `--port <number>` | Server port | `27015` |
 
 ## ⚔️ Gameplay Mechanics (The Science of Shape Violence)
 
@@ -118,10 +140,11 @@ Player 1 (Host/Server)  ←──ENet UDP──→  Player 2 (Client)
          └──────────ENet UDP──────────→  Player 3 (Client)
 ```
 
-- **Protocol**: ENet over UDP (port 27015)
+- **Protocol**: ENet over UDP (port 27015, configurable)
 - **Architecture**: Host-authoritative with client-side prediction
-- **Tick Rate**: ~20 Hz state sync
+- **Tick Rate**: ~30 Hz state sync
 - **Serialization**: Custom pipe-delimited format (because JSON is for cowards)
+- **Dedicated Server**: Headless LÖVE2D mode with all visual/audio modules disabled
 
 ## 🔧 Recent Updates
 
