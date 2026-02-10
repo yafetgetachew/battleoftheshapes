@@ -555,8 +555,14 @@ function drawMenu(W, H)
     end
 
 	love.graphics.setFont(getFont(14))
-    love.graphics.setColor(0.5, 0.5, 0.5)
-    love.graphics.printf("Use ↑/↓ to select, Enter to confirm", 0, H - 60, W, "center")
+	-- Show status/errors on the menu (e.g. host bind failures, disconnect messages).
+	if menuStatus and #menuStatus > 0 then
+		love.graphics.setColor(1.0, 0.45, 0.45)
+		love.graphics.printf(menuStatus, 0, H - 90, W, "center")
+	end
+	
+	love.graphics.setColor(0.5, 0.5, 0.5)
+	love.graphics.printf("Use ↑/↓ to select, Enter to confirm", 0, H - 60, W, "center")
 end
 
 -- ─────────────────────────────────────────────

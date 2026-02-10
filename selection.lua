@@ -98,7 +98,10 @@ end
 function Selection:draw(gameWidth, gameHeight, controls)
     local W = gameWidth or 1280
     local H = gameHeight or 720
-	    ensureFonts()
+	ensureFonts()
+	local titleFont = _titleFont
+	local subFont = _subFont
+	local statsFont = _statsFont
 
     -- Background
     love.graphics.setColor(0.08, 0.08, 0.14)
@@ -106,10 +109,10 @@ function Selection:draw(gameWidth, gameHeight, controls)
 
     -- Title
     love.graphics.setColor(1, 1, 1)
-	    love.graphics.setFont(_titleFont)
+	love.graphics.setFont(titleFont)
     love.graphics.printf("B.O.T.S - Battle of the Shapes", 0, 30, W, "center")
 
-	    love.graphics.setFont(_subFont)
+	love.graphics.setFont(subFont)
     love.graphics.setColor(0.7, 0.7, 0.7)
     love.graphics.printf("Select Your Shape", 0, 72, W, "center")
 
@@ -131,8 +134,6 @@ function Selection:draw(gameWidth, gameHeight, controls)
 	    if self.localPlayerId >= 1 and self.localPlayerId <= self.playerCount then
 	        labels[self.localPlayerId] = "Player " .. self.localPlayerId .. " (" .. string.upper(leftName) .. "/" .. string.upper(rightName) .. " + " .. string.upper(confirmName) .. ")"
 	    end
-
-	    local statsFont = _statsFont
 
     for p = 1, self.playerCount do
         local px = startX + (p - 1) * (panelW + gap)
@@ -166,6 +167,7 @@ function Selection:draw(gameWidth, gameHeight, controls)
 
         -- Shape name
         love.graphics.setColor(1, 1, 1)
+		love.graphics.setFont(subFont)
         love.graphics.printf(def.name, px, panelY + 210, panelW, "center")
 
         -- Stats
