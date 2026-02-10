@@ -251,6 +251,7 @@ end
 function Network.startDiscovery()
     local socket = require("socket")
     discoverySocket = socket.udp()
+    discoverySocket:setoption("reuseaddr", true)
     discoverySocket:setsockname("*", DISCOVERY_PORT)
     discoverySocket:settimeout(0)
     discoveredLobbies = {}
@@ -268,8 +269,15 @@ function Network.updateDiscovery(dt)
     if not discoverySocket then return end
     local data, ip, port = discoverySocket:receivefrom()
     while data do
-        local prefix, hostName, playerCount = data:match("^(BOTS_LOBBY)|([^|]+)|(%d+)$")
-        if prefix then
+        -- Match pattern: BOTS_LOBBY|hostname|playercount
+        local parts = {}
+        for part in data:gmatch("[^|]+") do
+            table.insert(parts, part)
+        end
+        if #parts == 3 and parts[1] == "BOTS_LOBBY" then
+            local prefix = parts[1]
+            local hostName = parts[2]
+            local playerCount = tonumber(parts[3])
             local found = false
             for _, lobby in ipairs(discoveredLobbies) do
                 if lobby.ip == ip then
@@ -311,6 +319,7 @@ function Network._startBroadcast()
     local socket = require("socket")
     broadcastSocket = socket.udp()
     broadcastSocket:setoption("broadcast", true)
+    broadcastSocket:setoption("reuseaddr", true)
     broadcastSocket:settimeout(0)
     broadcastTimer = 0
     -- Compute subnet broadcast address (e.g. 192.168.1.255)
@@ -338,11 +347,13 @@ function Network._updateBroadcast(dt)
         local playerCount = Network.getConnectedCount()
         local hostName = Network.getHostAddress()
         local msg = "BOTS_LOBBY|" .. hostName .. "|" .. tostring(playerCount)
-        -- Send to both global and subnet broadcast for macOS compatibility
+        -- Send to global broadcast, subnet broadcast, and loopback for same-machine testing
         broadcastSocket:sendto(msg, "255.255.255.255", DISCOVERY_PORT)
         if subnetBroadcast ~= "255.255.255.255" then
             broadcastSocket:sendto(msg, subnetBroadcast, DISCOVERY_PORT)
         end
+        -- Also send directly to loopback for same-machine testing
+        broadcastSocket:sendto(msg, "127.0.0.1", DISCOVERY_PORT)
     end
 end
 

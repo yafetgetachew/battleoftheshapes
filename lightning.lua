@@ -101,6 +101,9 @@ function Lightning._generateBoltSegments(x)
     return segments
 end
 
+-- Public version for network sync
+Lightning.generateBoltSegments = Lightning._generateBoltSegments
+
 function Lightning.draw()
     -- Draw warnings (pulsing circle on ground)
     for _, w in ipairs(warnings) do
@@ -152,6 +155,15 @@ function Lightning.getState()
         warnings = warnings,
         nextStrikeTimer = nextStrikeTimer
     }
+end
+
+-- Apply state from network (clients receive from host)
+function Lightning.setState(state)
+    if state then
+        strikes = state.strikes or {}
+        warnings = state.warnings or {}
+        nextStrikeTimer = state.nextStrikeTimer or 5
+    end
 end
 
 return Lightning

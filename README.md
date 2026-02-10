@@ -31,7 +31,11 @@ That's it. That's the whole thing. You're welcome.
 
 ## 🕹️ Controls
 
-### Player 1 (The Host, The Legend, The Server Itself)
+**NEW!** You can now choose your preferred control scheme from the **Settings** menu!
+
+### Control Scheme Options
+
+**WASD + Space** (Default)
 | Action | Key |
 |--------|-----|
 | Move Left | `A` |
@@ -39,7 +43,7 @@ That's it. That's the whole thing. You're welcome.
 | Jump | `Space` |
 | Cast Fireball | `W` |
 
-### Players 2 & 3 (The Brave Challengers)
+**Arrows + Enter**
 | Action | Key |
 |--------|-----|
 | Move Left | `←` |
@@ -47,10 +51,13 @@ That's it. That's the whole thing. You're welcome.
 | Jump | `Enter` |
 | Cast Fireball | `↑` |
 
-| Universal | Key |
-|-----------|-----|
+**Universal Controls**
+| Action | Key |
+|--------|-----|
 | Quit | `Escape` |
 | Restart (Game Over) | `R` |
+
+> 💡 **Tip**: Access the Settings menu from the main menu to switch between control schemes. Your preference is saved automatically!
 
 ## 🌐 LAN Multiplayer (Shapes Across the Network)
 
@@ -68,9 +75,10 @@ That's it. That's the whole thing. You're welcome.
 
 1. Launch the game on another computer on the same LAN
 2. Admire the splash screen (we worked hard on it)
-3. Select **"Join Game"**
-4. Type the host's IP address and press `Enter`
-5. Pick your shape and prepare for TOTAL SHAPE WARFARE
+3. Select **"Browse Games"** to auto-discover games on your LAN, or **"Join by IP"** to manually enter the host's address
+4. If using Browse Games, select the host from the list and press `Enter`
+5. If using Join by IP, type the host's IP address and press `Enter`
+6. Pick your shape and prepare for TOTAL SHAPE WARFARE
 
 ## ⚔️ Gameplay Mechanics (The Science of Shape Violence)
 
@@ -115,6 +123,14 @@ Player 1 (Host/Server)  ←──ENet UDP──→  Player 2 (Client)
 - **Architecture**: Host-authoritative with client-side prediction
 - **Tick Rate**: ~20 Hz state sync
 - **Serialization**: Custom pipe-delimited format (because JSON is for cowards)
+
+## 🔧 Recent Updates
+
+### Version 1.1 - Quality of Life Improvements
+- ✅ **Fixed LAN game discovery**: UDP broadcast now properly detects games on the local network
+- ✅ **Fixed lightning synchronization**: Clients now see lightning strikes and warnings in real-time
+- ✅ **Fixed fullscreen scaling**: Game now properly scales to native resolution with correct aspect ratio
+- ✅ **Added control scheme configuration**: Choose between WASD+Space or Arrows+Enter from the Settings menu
 
 ## 🙏 Credits
 
