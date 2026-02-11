@@ -32,87 +32,111 @@ function Dropbox.reset()
     spawnTimer = 10
 end
 
+-- Get current state for network sync (host → clients)
+function Dropbox.getState()
+    return {
+        boxes = boxes,
+        charges = charges,
+        spawnTimer = spawnTimer
+    }
+end
+
+-- Set state from network sync (clients receive from host)
+function Dropbox.setState(state)
+    if not state then return end
+    boxes = state.boxes or {}
+    charges = state.charges or {}
+    spawnTimer = state.spawnTimer or 10
+end
+
 function Dropbox.update(dt, players)
-    -- Spawn timer
-    spawnTimer = spawnTimer - dt
-    if spawnTimer <= 0 then
-        Dropbox._spawnBox()
-        spawnTimer = Dropbox.SPAWN_INTERVAL
-    end
-
-    -- Update boxes with physics
-    for i = #boxes, 1, -1 do
-        local box = boxes[i]
-        local halfSize = Dropbox.BOX_SIZE / 2
-
-        -- Apply gravity
-        box.vy = box.vy + Dropbox.BOX_GRAVITY * dt
-
-        -- Apply velocity
-        box.x = box.x + box.vx * dt
-        box.y = box.y + box.vy * dt
-
-        -- Horizontal friction when on ground
-        if box.onGround then
-            box.vx = box.vx * Dropbox.BOX_FRICTION
-            if math.abs(box.vx) < 5 then box.vx = 0 end
-        end
-
-        -- Ground collision with bounce
-        if box.y + halfSize >= Physics.GROUND_Y then
-            box.y = Physics.GROUND_Y - halfSize
-            if box.vy > 0 then
-                box.vy = -box.vy * Dropbox.BOX_BOUNCE
-                if math.abs(box.vy) < 30 then
-                    box.vy = 0
-                    box.onGround = true
-                end
-            end
-        else
-            box.onGround = false
-        end
-
-        -- Wall collision
-        if box.x - halfSize < Physics.WALL_LEFT then
-            box.x = Physics.WALL_LEFT + halfSize
-            box.vx = -box.vx * 0.5
-        elseif box.x + halfSize > Physics.WALL_RIGHT then
-            box.x = Physics.WALL_RIGHT - halfSize
-            box.vx = -box.vx * 0.5
-        end
-
-        -- Player collision
-        for _, player in ipairs(players) do
-            if player.life > 0 then
-                Dropbox._resolvePlayerBoxCollision(player, box, dt)
-            end
-        end
-    end
-
-    -- Update life charges
-    -- Only host (or solo/demo) applies healing; clients receive authoritative life from host
+    -- Only host (or solo/demo) runs the authoritative simulation
+    -- Clients receive state from host via setState()
     local isAuthority = Network.getRole() ~= Network.ROLE_CLIENT
-    for i = #charges, 1, -1 do
-        local charge = charges[i]
-        charge.age = charge.age + dt
 
-        -- Check player pickup
-        for _, player in ipairs(players) do
-            if player.life > 0 and Dropbox._playerTouchesCharge(player, charge) then
-                -- Heal player (only if authority)
-                if isAuthority then
-                    player.life = math.min(player.maxLife, player.life + Dropbox.LIFE_HEAL)
+    if isAuthority then
+        -- Spawn timer (host only)
+        spawnTimer = spawnTimer - dt
+        if spawnTimer <= 0 then
+            Dropbox._spawnBox()
+            spawnTimer = Dropbox.SPAWN_INTERVAL
+        end
+
+        -- Update boxes with physics (host only)
+        for i = #boxes, 1, -1 do
+            local box = boxes[i]
+            local halfSize = Dropbox.BOX_SIZE / 2
+
+            -- Apply gravity
+            box.vy = box.vy + Dropbox.BOX_GRAVITY * dt
+
+            -- Apply velocity
+            box.x = box.x + box.vx * dt
+            box.y = box.y + box.vy * dt
+
+            -- Horizontal friction when on ground
+            if box.onGround then
+                box.vx = box.vx * Dropbox.BOX_FRICTION
+                if math.abs(box.vx) < 5 then box.vx = 0 end
+            end
+
+            -- Ground collision with bounce
+            if box.y + halfSize >= Physics.GROUND_Y then
+                box.y = Physics.GROUND_Y - halfSize
+                if box.vy > 0 then
+                    box.vy = -box.vy * Dropbox.BOX_BOUNCE
+                    if math.abs(box.vy) < 30 then
+                        box.vy = 0
+                        box.onGround = true
+                    end
                 end
-                player.hitFlash = 0.15  -- brief flash for feedback (visual only)
-                Sounds.play("fireball_cast")  -- reuse sound for pickup
-                table.remove(charges, i)
-                break
+            else
+                box.onGround = false
+            end
+
+            -- Wall collision
+            if box.x - halfSize < Physics.WALL_LEFT then
+                box.x = Physics.WALL_LEFT + halfSize
+                box.vx = -box.vx * 0.5
+            elseif box.x + halfSize > Physics.WALL_RIGHT then
+                box.x = Physics.WALL_RIGHT - halfSize
+                box.vx = -box.vx * 0.5
+            end
+
+            -- Player collision (host only)
+            for _, player in ipairs(players) do
+                if player.life > 0 then
+                    Dropbox._resolvePlayerBoxCollision(player, box, dt)
+                end
             end
         end
 
-        -- Remove expired charges
-        if charge.age >= Dropbox.CHARGE_LIFETIME then
-            table.remove(charges, i)
+        -- Update life charges (host only)
+        for i = #charges, 1, -1 do
+            local charge = charges[i]
+            charge.age = charge.age + dt
+
+            -- Check player pickup
+            for _, player in ipairs(players) do
+                if player.life > 0 and Dropbox._playerTouchesCharge(player, charge) then
+                    -- Heal player
+                    player.life = math.min(player.maxLife, player.life + Dropbox.LIFE_HEAL)
+                    player.hitFlash = 0.15
+                    Sounds.play("fireball_cast")
+                    table.remove(charges, i)
+                    break
+                end
+            end
+
+            -- Remove expired charges
+            if charge.age >= Dropbox.CHARGE_LIFETIME then
+                table.remove(charges, i)
+            end
+        end
+    else
+        -- Client: just update charge age for visual effects (blinking)
+        for _, charge in ipairs(charges) do
+            charge.age = charge.age + dt
         end
     end
 end

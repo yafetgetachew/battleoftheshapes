@@ -1026,6 +1026,47 @@ function processNetworkMessages()
                     })
                 end
             end
+
+        elseif msg.type == "dropbox_sync" then
+            -- Client receives dropbox state from host
+            if Network.getRole() == Network.ROLE_CLIENT then
+                local data = msg.data
+                if data then
+                    local newBoxes = {}
+                    local newCharges = {}
+                    local bc = data.bc or 0
+                    local cc = data.cc or 0
+                    for i = 1, bc do
+                        local bx = data["b" .. i .. "x"]
+                        local by = data["b" .. i .. "y"]
+                        if bx and by then
+                            newBoxes[i] = {
+                                x = bx,
+                                y = by,
+                                vx = data["b" .. i .. "vx"] or 0,
+                                vy = data["b" .. i .. "vy"] or 0,
+                                onGround = (data["b" .. i .. "og"] or 0) == 1
+                            }
+                        end
+                    end
+                    for i = 1, cc do
+                        local cx = data["c" .. i .. "x"]
+                        local cy = data["c" .. i .. "y"]
+                        if cx and cy then
+                            newCharges[i] = {
+                                x = cx,
+                                y = cy,
+                                age = data["c" .. i .. "a"] or 0
+                            }
+                        end
+                    end
+                    Dropbox.setState({
+                        boxes = newBoxes,
+                        charges = newCharges,
+                        spawnTimer = data.st or 10
+                    })
+                end
+            end
         end
     end
 end
@@ -1061,6 +1102,27 @@ function sendGameState()
         ldata["w" .. i .. "a"] = warning.age
     end
     Network.send("lightning_sync", ldata, false)
+
+    -- Send dropbox state to clients (single consolidated message)
+    local dropboxState = Dropbox.getState()
+    local ddata = {
+        bc = #dropboxState.boxes,
+        cc = #dropboxState.charges,
+        st = dropboxState.spawnTimer
+    }
+    for i, box in ipairs(dropboxState.boxes) do
+        ddata["b" .. i .. "x"] = box.x
+        ddata["b" .. i .. "y"] = box.y
+        ddata["b" .. i .. "vx"] = box.vx
+        ddata["b" .. i .. "vy"] = box.vy
+        ddata["b" .. i .. "og"] = box.onGround and 1 or 0
+    end
+    for i, charge in ipairs(dropboxState.charges) do
+        ddata["c" .. i .. "x"] = charge.x
+        ddata["c" .. i .. "y"] = charge.y
+        ddata["c" .. i .. "a"] = charge.age
+    end
+    Network.send("dropbox_sync", ddata, false)
 end
 
 -- Client sends its own player state to the host
