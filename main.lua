@@ -12,6 +12,7 @@ local Lightning   = require("lightning")
 local Sounds      = require("sounds")
 local Config      = require("config")
 local Dropbox     = require("dropbox")
+local Background  = require("background")
 
 -- Game states: "splash", "menu", "settings", "connecting", "selection", "countdown", "playing", "gameover"
 -- (Note: "browsing" state was removed - use "Join by IP" instead)
@@ -28,6 +29,10 @@ local networkSyncTimer = 0
 local screenShakeTimer = 0     -- remaining shake time (seconds)
 local screenShakeIntensity = 0 -- current shake magnitude (pixels)
 
+-- Low health heartbeat state
+local heartbeatTimer = 0       -- time until next heartbeat sound
+local heartbeatPulse = 0       -- current pulse intensity (0-1) for visual
+
 -- Demo mode state
 local demoMode = false     -- true when playing demo mode with bots
 local bots = {}            -- bot AI state for each bot player
@@ -36,15 +41,13 @@ local bots = {}            -- bot AI state for each bot player
 local menuChoice = 1       -- 1 = Host, 2 = Join, 3 = Demo, 4 = Settings
 local joinAddress = ""
 local menuStatus = ""
-local settingsRow = 1      -- 1 = Control Scheme, 2 = Player Count, 3 = Server Mode, 4 = Aim Assist
+local settingsRow = 1      -- 1-3 for grid rows
+local settingsCol = 1      -- 1-2 for grid columns (left/right)
 local serverMode = false   -- true = dedicated server (host is relay only)
 local ipHistoryIndex = 0   -- 0 = typing new IP, 1+ = selecting from history
 
 -- Game over
 local winner = nil
-
--- Parallax / background
-local bgStars = {}
 
 -- Scaling and resolution
 local GAME_WIDTH = 1280
@@ -76,20 +79,16 @@ function love.load()
     love.window.setFullscreen(true, "desktop")
     updateScaling()
 
-    -- Generate background stars
-    for i = 1, 80 do
-        bgStars[i] = {
-            x = math.random() * GAME_WIDTH,
-            y = math.random() * 600,
-            r = math.random() * 2 + 0.5,
-            brightness = math.random() * 0.5 + 0.2
-        }
-    end
+    -- Initialize parallax background
+    Background.init()
 
     -- Load configuration
     Config.load()
 
     Sounds.load()
+    -- Apply saved music mute setting
+    Sounds.setMusicMuted(Config.getMusicMuted())
+
     gameState = "splash"
     splashTimer = 0
 end
@@ -121,10 +120,14 @@ function love.update(dt)
     -- Cap delta to avoid physics tunneling on lag spikes
     dt = math.min(dt, 1/30)
 
+    -- Update parallax background (clouds drift)
+    Background.update(dt)
+
     if gameState == "splash" then
         splashTimer = splashTimer + dt
         if splashTimer >= 3.0 then
             gameState = "menu"
+            Sounds.startMenuMusic()  -- Start menu music when entering menu
         end
 
     elseif gameState == "menu" then
@@ -172,6 +175,7 @@ function love.update(dt)
             gameState = "playing"
             Lightning.reset()
             Dropbox.reset()
+            Sounds.startMusic()  -- Start background music when gameplay begins
         end
 
     elseif gameState == "playing" then
@@ -186,6 +190,11 @@ function love.update(dt)
             for _, p in ipairs(players) do
                 if p.life > 0 then
                     p:update(dt)
+                    -- Check for landing (sound + dust)
+                    if p:consumeLanding() then
+                        Sounds.play("land")
+                        Projectiles.spawnLandingDust(p.x, p.y + p.shapeHeight / 2)
+                    end
                 end
             end
 
@@ -215,6 +224,17 @@ function love.update(dt)
 
             -- Update dropboxes
             Dropbox.update(dt, players)
+
+            -- Check for player deaths (explosion effect)
+            for _, p in ipairs(players) do
+                p:checkDeath(dt)
+                if p:consumeDeath() then
+                    Sounds.play("death")
+                    Projectiles.spawnDeathExplosion(p.x, p.y, p.shapeKey)
+                    screenShakeTimer = 0.4
+                    screenShakeIntensity = 8
+                end
+            end
 
             -- Network sync: host broadcasts all state, clients send their own state
             if Network.getRole() ~= Network.ROLE_NONE then
@@ -247,6 +267,28 @@ function love.update(dt)
         if screenShakeTimer <= 0 then
             screenShakeTimer = 0
             screenShakeIntensity = 0
+        end
+    end
+
+    -- Low health heartbeat (only during gameplay for local player)
+    if gameState == "playing" then
+        local lowHealth = false
+        if localPlayer and localPlayer.life > 0 and localPlayer.life < localPlayer.maxLife * 0.25 then
+            lowHealth = true
+        end
+
+        if lowHealth then
+            heartbeatTimer = heartbeatTimer - dt
+            if heartbeatTimer <= 0 then
+                Sounds.play("heartbeat")
+                heartbeatTimer = 0.8  -- Time between heartbeats
+                heartbeatPulse = 1.0  -- Start visual pulse
+            end
+            -- Decay visual pulse
+            heartbeatPulse = math.max(0, heartbeatPulse - dt * 3)
+        else
+            heartbeatTimer = 0
+            heartbeatPulse = 0
         end
     end
 end
@@ -292,7 +334,8 @@ function love.draw()
         for _, p in ipairs(players) do p:drawShadow() end
 
         -- ── Players ──
-        for _, p in ipairs(players) do p:draw() end
+        local isGameOver = (gameState == "gameover")
+        for _, p in ipairs(players) do p:draw(isGameOver) end
 
         -- ── Projectiles ──
         Projectiles.draw()
@@ -326,6 +369,22 @@ function love.draw()
                 drawControlsHint(W, H)
             end
         end
+
+        -- Low health red vignette overlay
+        if heartbeatPulse > 0 then
+            local alpha = heartbeatPulse * 0.4
+            -- Draw red gradient vignette around screen edges
+            love.graphics.setColor(0.8, 0.1, 0.1, alpha)
+            local edgeSize = 80
+            -- Top edge
+            love.graphics.rectangle("fill", 0, 0, W, edgeSize)
+            -- Bottom edge
+            love.graphics.rectangle("fill", 0, H - edgeSize, W, edgeSize)
+            -- Left edge
+            love.graphics.rectangle("fill", 0, 0, edgeSize, H)
+            -- Right edge
+            love.graphics.rectangle("fill", W - edgeSize, 0, edgeSize, H)
+        end
     end
 
     -- Restore graphics state
@@ -350,6 +409,7 @@ function love.keypressed(key)
 
     if gameState == "splash" then
         gameState = "menu"
+        Sounds.startMenuMusic()
         return
     end
 
@@ -397,6 +457,9 @@ function love.keypressed(key)
                 end
             end
             if key == localPlayer.controls.jump then
+                if localPlayer.onGround then
+                    Sounds.play("jump")
+                end
                 localPlayer:jump()
                 if Network.getRole() ~= Network.ROLE_NONE then
                     Network.send("player_jump", {pid = localPlayer.id}, true)
@@ -458,25 +521,9 @@ end
 -- Drawing helpers
 -- ─────────────────────────────────────────────
 function drawBackground(W, H)
-    -- Gradient sky
-    local topColor    = {0.05, 0.05, 0.12}
-    local bottomColor = {0.12, 0.10, 0.20}
-    for y = 0, Physics.GROUND_Y, 4 do
-        local t = y / Physics.GROUND_Y
-        love.graphics.setColor(
-            topColor[1] + (bottomColor[1] - topColor[1]) * t,
-            topColor[2] + (bottomColor[2] - topColor[2]) * t,
-            topColor[3] + (bottomColor[3] - topColor[3]) * t
-        )
-        love.graphics.rectangle("fill", 0, y, W, 4)
-    end
-
-    -- Stars
-    for _, star in ipairs(bgStars) do
-        local flicker = star.brightness + math.sin(love.timer.getTime() * 1.5 + star.x) * 0.1
-        love.graphics.setColor(1, 1, 1, flicker)
-        love.graphics.circle("fill", star.x, star.y, star.r)
-    end
+    -- Calculate parallax offset from player positions
+    local parallaxOffset = Background.getParallaxOffset(players, W)
+    Background.draw(W, H, parallaxOffset)
 end
 
 function drawGround(W, H)
@@ -572,10 +619,13 @@ function handleMenuKey(key)
     if key == "up" or key == "w" then
         menuChoice = menuChoice - 1
         if menuChoice < 1 then menuChoice = 4 end
+        Sounds.play("menu_nav")
     elseif key == "down" or key == "s" then
         menuChoice = menuChoice + 1
         if menuChoice > 4 then menuChoice = 1 end
+        Sounds.play("menu_nav")
     elseif key == "return" or key == "space" then
+        Sounds.play("menu_select")
         if menuChoice == 1 then
             startAsHost()
         elseif menuChoice == 2 then
@@ -639,41 +689,58 @@ end
 -- Settings Screen
 -- ─────────────────────────────────────────────
 function handleSettingsKey(key)
-    local maxRows = 5
+    -- Grid layout: 2 columns x 3 rows
+    -- Left col (1): Control Scheme, Player Count, Server Mode
+    -- Right col (2): Aim Assist, Demo Invulnerability, Background Music
+    local maxRows = 3
+    local maxCols = 2
+
     if key == "up" or key == "w" then
         settingsRow = settingsRow - 1
         if settingsRow < 1 then settingsRow = maxRows end
+        Sounds.play("menu_nav")
     elseif key == "down" or key == "s" then
         settingsRow = settingsRow + 1
         if settingsRow > maxRows then settingsRow = 1 end
+        Sounds.play("menu_nav")
+    elseif key == "tab" then
+        -- Switch columns
+        settingsCol = settingsCol == 1 and 2 or 1
+        Sounds.play("menu_nav")
     elseif key == "left" or key == "a" or key == "right" or key == "d" then
-        if settingsRow == 1 then
-            -- Toggle control scheme
-            local current = Config.getControlScheme()
-            if current == "wasd" then
-                Config.setControlScheme("arrows")
-            else
-                Config.setControlScheme("wasd")
+        Sounds.play("menu_nav")
+        -- Toggle settings based on current grid position
+        if settingsCol == 1 then
+            -- Left column
+            if settingsRow == 1 then
+                -- Toggle control scheme
+                local current = Config.getControlScheme()
+                Config.setControlScheme(current == "wasd" and "arrows" or "wasd")
+            elseif settingsRow == 2 then
+                -- Toggle player count
+                local current = Config.getPlayerCount()
+                Config.setPlayerCount(current == 2 and 3 or 2)
+            elseif settingsRow == 3 then
+                -- Toggle server mode
+                Config.setServerMode(not Config.getServerMode())
             end
-        elseif settingsRow == 2 then
-            -- Toggle player count
-            local current = Config.getPlayerCount()
-            if current == 2 then
-                Config.setPlayerCount(3)
-            else
-                Config.setPlayerCount(2)
+        else
+            -- Right column
+            if settingsRow == 1 then
+                -- Toggle aim assist
+                Config.setAimAssist(not Config.getAimAssist())
+            elseif settingsRow == 2 then
+                -- Toggle demo invulnerability
+                Config.setDemoInvulnerable(not Config.getDemoInvulnerable())
+            elseif settingsRow == 3 then
+                -- Toggle background music
+                local newMuted = not Config.getMusicMuted()
+                Config.setMusicMuted(newMuted)
+                Sounds.setMusicMuted(newMuted)
             end
-        elseif settingsRow == 3 then
-            -- Toggle server mode
-            Config.setServerMode(not Config.getServerMode())
-        elseif settingsRow == 4 then
-            -- Toggle aim assist
-            Config.setAimAssist(not Config.getAimAssist())
-        elseif settingsRow == 5 then
-            -- Toggle demo invulnerability
-            Config.setDemoInvulnerable(not Config.getDemoInvulnerable())
         end
-    elseif key == "backspace" then
+    elseif key == "backspace" or key == "escape" then
+        Sounds.play("menu_nav")
         gameState = "menu"
     end
 end
@@ -682,188 +749,100 @@ function drawSettings(W, H)
     love.graphics.setColor(0.06, 0.06, 0.1)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
-	love.graphics.setFont(getFont(36))
+    -- Title
+    love.graphics.setFont(getFont(32))
     love.graphics.setColor(1.0, 0.85, 0.2)
-    love.graphics.printf("Settings", 0, 80, W, "center")
+    love.graphics.printf("Settings", 0, 50, W, "center")
 
-	local labelFont = getFont(24)
-	local valueFont = getFont(32)
-	local detailFont = getFont(18)
+    -- Grid layout: 2 columns x 3 rows
+    local labelFont = getFont(16)
+    local valueFont = getFont(20)
+    local colWidth = 320
+    local leftColX = W/2 - colWidth - 40
+    local rightColX = W/2 + 40
+    local startY = 130
+    local rowHeight = 140
 
-    -- Row 1: Control Scheme
-    local row1Y = 150
-    love.graphics.setFont(labelFont)
-    if settingsRow == 1 then
-        love.graphics.setColor(1.0, 1.0, 0.4)
-    else
-        love.graphics.setColor(0.6, 0.6, 0.6)
+    -- Helper to draw a setting cell
+    local function drawCell(col, row, label, value, isOn, detail)
+        local x = (col == 1) and leftColX or rightColX
+        local y = startY + (row - 1) * rowHeight
+        local isSelected = (settingsCol == col and settingsRow == row)
+
+        -- Draw selection box
+        if isSelected then
+            love.graphics.setColor(0.2, 0.2, 0.3, 0.8)
+            love.graphics.rectangle("fill", x - 10, y - 8, colWidth + 20, rowHeight - 20, 8, 8)
+            love.graphics.setColor(1.0, 0.85, 0.2, 0.8)
+            love.graphics.setLineWidth(2)
+            love.graphics.rectangle("line", x - 10, y - 8, colWidth + 20, rowHeight - 20, 8, 8)
+        end
+
+        -- Label
+        love.graphics.setFont(labelFont)
+        love.graphics.setColor(isSelected and {1.0, 1.0, 0.4} or {0.6, 0.6, 0.6})
+        love.graphics.printf(label, x, y, colWidth, "center")
+
+        -- Value
+        love.graphics.setFont(valueFont)
+        if isOn == nil then
+            -- Custom color (for control scheme)
+            love.graphics.setColor(isSelected and {0.4, 0.9, 1.0} or {0.3, 0.6, 0.7})
+        elseif isOn then
+            love.graphics.setColor(isSelected and {0.4, 1.0, 0.4} or {0.3, 0.7, 0.3})
+        else
+            love.graphics.setColor(isSelected and {1.0, 0.5, 0.4} or {0.7, 0.4, 0.3})
+        end
+        love.graphics.printf("◀ " .. value .. " ▶", x, y + 24, colWidth, "center")
+
+        -- Detail (smaller, below value)
+        if detail then
+            love.graphics.setFont(getFont(12))
+            love.graphics.setColor(0.45, 0.45, 0.5)
+            love.graphics.printf(detail, x, y + 52, colWidth, "center")
+        end
     end
-    love.graphics.printf("Control Scheme:", 0, row1Y, W, "center")
 
-    love.graphics.setFont(valueFont)
+    -- Get current values
     local scheme = Config.getControlScheme()
-    if scheme == "wasd" then
-        if settingsRow == 1 then
-            love.graphics.setColor(0.4, 1.0, 0.4)
-        else
-            love.graphics.setColor(0.3, 0.7, 0.3)
-        end
-        love.graphics.printf("< WASD + Space >", 0, row1Y + 35, W, "center")
-    else
-        if settingsRow == 1 then
-            love.graphics.setColor(0.4, 0.8, 1.0)
-        else
-            love.graphics.setColor(0.3, 0.6, 0.7)
-        end
-        love.graphics.printf("< Arrows + Enter >", 0, row1Y + 35, W, "center")
-    end
-
-    love.graphics.setFont(detailFont)
-    love.graphics.setColor(0.5, 0.5, 0.5)
-    if scheme == "wasd" then
-        love.graphics.printf("Move: A/D  •  Jump: Space  •  Cast: W", 0, row1Y + 72, W, "center")
-    else
-        love.graphics.printf("Move: ←/→  •  Jump: Enter  •  Cast: ↑", 0, row1Y + 72, W, "center")
-    end
-
-    -- Row 2: Player Count
-    local row2Y = 250
-    love.graphics.setFont(labelFont)
-    if settingsRow == 2 then
-        love.graphics.setColor(1.0, 1.0, 0.4)
-    else
-        love.graphics.setColor(0.6, 0.6, 0.6)
-    end
-    love.graphics.printf("Player Count:", 0, row2Y, W, "center")
-
-    love.graphics.setFont(valueFont)
     local pc = Config.getPlayerCount()
-    if settingsRow == 2 then
-        love.graphics.setColor(1.0, 0.85, 0.2)
-    else
-        love.graphics.setColor(0.7, 0.6, 0.2)
-    end
-    love.graphics.printf("< " .. pc .. " Players >", 0, row2Y + 35, W, "center")
-
-    love.graphics.setFont(detailFont)
-    love.graphics.setColor(0.5, 0.5, 0.5)
-    if pc == 2 then
-        love.graphics.printf("1v1 duel mode", 0, row2Y + 72, W, "center")
-    else
-        love.graphics.printf("3-player free-for-all", 0, row2Y + 72, W, "center")
-    end
-
-    -- Row 3: Server Mode
-    local row3Y = 340
-    love.graphics.setFont(labelFont)
-    if settingsRow == 3 then
-        love.graphics.setColor(1.0, 1.0, 0.4)
-    else
-        love.graphics.setColor(0.6, 0.6, 0.6)
-    end
-    love.graphics.printf("Server Mode:", 0, row3Y, W, "center")
-
-    love.graphics.setFont(valueFont)
     local sm = Config.getServerMode()
-    if sm then
-        if settingsRow == 3 then
-            love.graphics.setColor(0.4, 1.0, 0.4)
-        else
-            love.graphics.setColor(0.3, 0.7, 0.3)
-        end
-        love.graphics.printf("< ON >", 0, row3Y + 30, W, "center")
-    else
-        if settingsRow == 3 then
-            love.graphics.setColor(1.0, 0.5, 0.4)
-        else
-            love.graphics.setColor(0.7, 0.4, 0.3)
-        end
-        love.graphics.printf("< OFF >", 0, row3Y + 30, W, "center")
-    end
-
-    love.graphics.setFont(detailFont)
-    love.graphics.setColor(0.5, 0.5, 0.5)
-    if sm then
-        love.graphics.printf("Host is relay only — does not play", 0, row3Y + 60, W, "center")
-    else
-        love.graphics.printf("Host joins the game as a player", 0, row3Y + 60, W, "center")
-    end
-
-    -- Row 4: Aim Assist
-    local row4Y = 430
-    love.graphics.setFont(labelFont)
-    if settingsRow == 4 then
-        love.graphics.setColor(1.0, 1.0, 0.4)
-    else
-        love.graphics.setColor(0.6, 0.6, 0.6)
-    end
-    love.graphics.printf("Aim Assist:", 0, row4Y, W, "center")
-
-    love.graphics.setFont(valueFont)
     local aa = Config.getAimAssist()
-    if aa then
-        if settingsRow == 4 then
-            love.graphics.setColor(0.4, 1.0, 0.4)
-        else
-            love.graphics.setColor(0.3, 0.7, 0.3)
-        end
-        love.graphics.printf("< ON >", 0, row4Y + 30, W, "center")
-    else
-        if settingsRow == 4 then
-            love.graphics.setColor(1.0, 0.5, 0.4)
-        else
-            love.graphics.setColor(0.7, 0.4, 0.3)
-        end
-        love.graphics.printf("< OFF >", 0, row4Y + 30, W, "center")
-    end
-
-    love.graphics.setFont(detailFont)
-    love.graphics.setColor(0.5, 0.5, 0.5)
-    if aa then
-        love.graphics.printf("Fireballs auto-target nearest enemy", 0, row4Y + 60, W, "center")
-    else
-        love.graphics.printf("Fireballs shoot in facing direction", 0, row4Y + 60, W, "center")
-    end
-
-    -- Row 5: Demo Invulnerability
-    local row5Y = 520
-    love.graphics.setFont(labelFont)
-    if settingsRow == 5 then
-        love.graphics.setColor(1.0, 1.0, 0.4)
-    else
-        love.graphics.setColor(0.6, 0.6, 0.6)
-    end
-    love.graphics.printf("Demo Invulnerability:", 0, row5Y, W, "center")
-
-    love.graphics.setFont(valueFont)
     local di = Config.getDemoInvulnerable()
-    if di then
-        if settingsRow == 5 then
-            love.graphics.setColor(0.4, 1.0, 0.4)
-        else
-            love.graphics.setColor(0.3, 0.7, 0.3)
-        end
-        love.graphics.printf("< ON >", 0, row5Y + 30, W, "center")
-    else
-        if settingsRow == 5 then
-            love.graphics.setColor(1.0, 0.5, 0.4)
-        else
-            love.graphics.setColor(0.7, 0.4, 0.3)
-        end
-        love.graphics.printf("< OFF >", 0, row5Y + 30, W, "center")
-    end
+    local mm = Config.getMusicMuted()
 
-    love.graphics.setFont(detailFont)
-    love.graphics.setColor(0.5, 0.5, 0.5)
-    if di then
-        love.graphics.printf("Player 1 cannot take damage in demo mode", 0, row5Y + 60, W, "center")
-    else
-        love.graphics.printf("Normal damage rules in demo mode", 0, row5Y + 60, W, "center")
-    end
+    -- Left column
+    drawCell(1, 1, "Controls",
+        scheme == "wasd" and "WASD" or "Arrows", nil,
+        scheme == "wasd" and "A/D move • Space jump • W cast" or "←/→ move • Enter jump • ↑ cast")
+    drawCell(1, 2, "Players",
+        pc .. " Players", pc == 3,
+        pc == 2 and "1v1 duel" or "Free-for-all")
+    drawCell(1, 3, "Server Mode",
+        sm and "ON" or "OFF", sm,
+        sm and "Host is relay only" or "Host plays too")
 
-	love.graphics.setFont(getFont(14))
+    -- Right column
+    drawCell(2, 1, "Aim Assist",
+        aa and "ON" or "OFF", aa,
+        aa and "Auto-target enemies" or "Manual aiming")
+    drawCell(2, 2, "Demo Invulnerable",
+        di and "ON" or "OFF", di,
+        di and "P1 invincible in demo" or "Normal damage")
+    drawCell(2, 3, "Music",
+        mm and "OFF" or "ON", not mm,
+        mm and "Music muted" or "Music enabled")
+
+    -- Column indicator
+    love.graphics.setFont(getFont(14))
+    love.graphics.setColor(0.5, 0.5, 0.6)
+    love.graphics.printf("← Left Column", leftColX, startY + 3 * rowHeight + 10, colWidth, "center")
+    love.graphics.printf("Right Column →", rightColX, startY + 3 * rowHeight + 10, colWidth, "center")
+
+    -- Instructions
+    love.graphics.setFont(getFont(14))
     love.graphics.setColor(0.5, 0.5, 0.5)
-    love.graphics.printf("↑/↓ select  •  ←/→ change  •  Backspace to go back", 0, H - 60, W, "center")
+    love.graphics.printf("↑/↓ navigate  •  Tab switch column  •  ←/→ change  •  Backspace/Esc back", 0, H - 50, W, "center")
 end
 
 function drawConnecting(W, H)
@@ -1086,6 +1065,8 @@ function processNetworkMessages()
             menuStatus = "Disconnected from server"
             gameState = "menu"
             Network.stop()
+            Sounds.stopMusic()
+            Sounds.startMenuMusic()
 
         elseif msg.type == "sel_browse" then
             -- Remote player is browsing shapes
@@ -1157,6 +1138,7 @@ function processNetworkMessages()
             -- Remote player jumped
             local data = msg.data
             if data and data.pid and players[data.pid] then
+                Sounds.play("jump")
                 players[data.pid]:jump()
                 -- Host relays to other clients
                 if Network.getRole() == Network.ROLE_HOST then
@@ -1190,6 +1172,8 @@ function processNetworkMessages()
             if data and data.winner ~= nil then
                 winner = data.winner
                 gameState = "gameover"
+                Sounds.stopMusic()  -- Stop background music
+                Sounds.play("victory")  -- Play victory fanfare
             end
 
         elseif msg.type == "game_restart" then
@@ -1414,6 +1398,8 @@ function checkGameOver()
             winner = 0  -- draw
         end
         gameState = "gameover"
+        Sounds.stopMusic()  -- Stop background music
+        Sounds.play("victory")  -- Play victory fanfare
         if Network.getRole() == Network.ROLE_HOST then
             Network.send("game_over", {winner = winner}, true)
         end
@@ -1443,6 +1429,8 @@ end
 -- ─────────────────────────────────────────────
 function returnToMenu()
     Network.stop()
+    Sounds.stopMusic()  -- Stop gameplay music
+    Sounds.startMenuMusic()  -- Start menu music
     players = {}
     selection = nil
     winner = nil
@@ -1474,6 +1462,8 @@ function restartGame()
     end
     if Network.getRole() == Network.ROLE_NONE then
         -- Solo / no network: return to menu
+        Sounds.stopMusic()
+        Sounds.startMenuMusic()
         gameState = "menu"
         players = {}
         winner = nil
@@ -1614,6 +1604,11 @@ function updateDemoMode(dt)
     for _, p in ipairs(players) do
         if p.life > 0 then
             p:update(dt)
+            -- Check for landing (sound + dust)
+            if p:consumeLanding() then
+                Sounds.play("land")
+                Projectiles.spawnLandingDust(p.x, p.y + p.shapeHeight / 2)
+            end
         end
     end
 
@@ -1648,6 +1643,17 @@ function updateDemoMode(dt)
 
     -- Update dropboxes
     Dropbox.update(dt, players)
+
+    -- Check for player deaths (explosion effect)
+    for _, p in ipairs(players) do
+        p:checkDeath(dt)
+        if p:consumeDeath() then
+            Sounds.play("death")
+            Projectiles.spawnDeathExplosion(p.x, p.y, p.shapeKey)
+            screenShakeTimer = 0.4
+            screenShakeIntensity = 8
+        end
+    end
 
     -- Check for game over
     checkGameOver()

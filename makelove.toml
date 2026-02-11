@@ -13,6 +13,7 @@ build_directory = "builds"
 # Patterns starting with "-" exclude, "+" or no prefix include
 love_files = [
     "+./*.lua",
+    "+./*.mp3",
     "+./assets",
     "+./assets/*",
     "+./assets/fonts",

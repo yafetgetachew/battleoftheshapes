@@ -9,7 +9,7 @@ local Network = require("network")
 
 local Projectiles = {}
 
-Projectiles.DAMAGE         = 30
+Projectiles.DAMAGE         = 15
 Projectiles.WILL_COST      = 10
 Projectiles.FIREBALL_SPEED = 600     -- px/s horizontal
 Projectiles.FIREBALL_RADIUS = 12
@@ -152,17 +152,24 @@ function Projectiles.update(dt, players)
     for i = #effects, 1, -1 do
         local e = effects[i]
         e.age = e.age + dt
+        local isDeath = (e.projType == "death")
         for j = #e.particles, 1, -1 do
             local pt = e.particles[j]
             pt.x = pt.x + pt.vx * dt
             pt.y = pt.y + pt.vy * dt
             pt.vy = pt.vy + 300 * dt   -- gravity on sparks
+            -- Slow down death particles for more dramatic effect
+            if isDeath then
+                pt.vx = pt.vx * (1 - 1.5 * dt)
+            end
             pt.life = pt.life - dt
             if pt.life <= 0 then
                 table.remove(e.particles, j)
             end
         end
-        if e.age > 0.6 then
+        -- Death explosions last longer
+        local maxAge = isDeath and 1.2 or 0.6
+        if e.age > maxAge then
             table.remove(effects, i)
         end
     end
@@ -189,21 +196,42 @@ function Projectiles.draw()
     -- Draw hit effects
     for _, e in ipairs(effects) do
         local isDash = (e.projType == "dash")
-        -- Expanding ring
-        local ringAlpha = math.max(0, 1 - e.age / 0.4)
-        local ringR = 10 + e.age * (isDash and 150 or 120)
-        if isDash then
-            love.graphics.setColor(0.4, 0.8, 1.0, ringAlpha * 0.6)
-        else
-            love.graphics.setColor(1.0, 0.8, 0.2, ringAlpha * 0.5)
-        end
-        love.graphics.setLineWidth(3)
-        love.graphics.circle("line", e.x, e.y, ringR)
+        local isDust = (e.projType == "dust")
+        local isDeath = (e.projType == "death")
 
-        -- Spark particles
+        -- Expanding ring (skip for dust and death)
+        if not isDust and not isDeath then
+            local ringAlpha = math.max(0, 1 - e.age / 0.4)
+            local ringR = 10 + e.age * (isDash and 150 or 120)
+            if isDash then
+                love.graphics.setColor(0.4, 0.8, 1.0, ringAlpha * 0.6)
+            else
+                love.graphics.setColor(1.0, 0.8, 0.2, ringAlpha * 0.5)
+            end
+            love.graphics.setLineWidth(3)
+            love.graphics.circle("line", e.x, e.y, ringR)
+        end
+
+        -- Death explosion: large expanding shockwave ring
+        if isDeath then
+            local ringAlpha = math.max(0, 1 - e.age / 0.6)
+            local ringR = 20 + e.age * 200
+            love.graphics.setColor(1.0, 0.6, 0.2, ringAlpha * 0.7)
+            love.graphics.setLineWidth(4)
+            love.graphics.circle("line", e.x, e.y, ringR)
+            -- Inner glow
+            love.graphics.setColor(1.0, 0.9, 0.5, ringAlpha * 0.3)
+            love.graphics.circle("fill", e.x, e.y, math.max(0, 30 - e.age * 60))
+        end
+
+        -- Spark/dust/death particles
         for _, pt in ipairs(e.particles) do
             local alpha = math.max(0, pt.life / pt.maxLife)
-            if isDash then
+            if isDeath and pt.color then
+                love.graphics.setColor(pt.color[1], pt.color[2], pt.color[3], alpha)
+            elseif isDust then
+                love.graphics.setColor(0.6, 0.55, 0.5, alpha * 0.6)  -- Brownish dust
+            elseif isDash then
                 love.graphics.setColor(0.5, 0.85, 1.0, alpha)
             else
                 love.graphics.setColor(1.0, 0.9, 0.3, alpha)
@@ -331,6 +359,82 @@ function Projectiles.spawnDashImpact(x, y)
             r = math.random() * 3 + 1,
             life = 0.25 + math.random() * 0.3,
             maxLife = 0.55
+        })
+    end
+    table.insert(effects, e)
+end
+
+-- Spawn landing dust particles (small puff when player lands)
+function Projectiles.spawnLandingDust(x, y)
+    local e = {
+        x = x,
+        y = y,
+        projType = "dust",
+        age = 0,
+        particles = {}
+    }
+    -- Small horizontal burst of dust
+    for _ = 1, 8 do
+        local angle = math.random() * math.pi  -- Only upward half-circle
+        local speed = 30 + math.random() * 50
+        table.insert(e.particles, {
+            x = x + (math.random() - 0.5) * 20,
+            y = y,
+            vx = math.cos(angle) * speed * (math.random() > 0.5 and 1 or -1),
+            vy = -math.sin(angle) * speed * 0.5 - 10,
+            r = math.random() * 3 + 2,
+            life = 0.2 + math.random() * 0.15,
+            maxLife = 0.35
+        })
+    end
+    table.insert(effects, e)
+end
+
+-- Spawn death explosion (player blows up into fragments)
+function Projectiles.spawnDeathExplosion(x, y, shapeKey)
+    local e = {
+        x = x,
+        y = y,
+        projType = "death",
+        age = 0,
+        particles = {}
+    }
+    -- Get player color based on shape
+    local colors = {
+        triangle = {1.0, 0.4, 0.4},   -- Red
+        square = {0.4, 0.6, 1.0},     -- Blue
+        circle = {0.4, 1.0, 0.5}      -- Green
+    }
+    local color = colors[shapeKey] or {1, 1, 1}
+
+    -- Large burst of fragments
+    for _ = 1, 24 do
+        local angle = math.random() * math.pi * 2
+        local speed = 150 + math.random() * 300
+        table.insert(e.particles, {
+            x = x + (math.random() - 0.5) * 20,
+            y = y + (math.random() - 0.5) * 20,
+            vx = math.cos(angle) * speed,
+            vy = math.sin(angle) * speed - 100,
+            r = math.random() * 6 + 4,
+            life = 0.6 + math.random() * 0.4,
+            maxLife = 1.0,
+            color = color
+        })
+    end
+    -- Inner bright core particles
+    for _ = 1, 12 do
+        local angle = math.random() * math.pi * 2
+        local speed = 50 + math.random() * 100
+        table.insert(e.particles, {
+            x = x,
+            y = y,
+            vx = math.cos(angle) * speed,
+            vy = math.sin(angle) * speed - 50,
+            r = math.random() * 4 + 2,
+            life = 0.3 + math.random() * 0.2,
+            maxLife = 0.5,
+            color = {1, 1, 0.8}  -- Bright yellow-white core
         })
     end
     table.insert(effects, e)

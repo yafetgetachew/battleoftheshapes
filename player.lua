@@ -60,6 +60,15 @@ function Player.new(id, controls)
     self._lastTapRight   = 0           -- timestamp of last right-key press
     -- Invulnerability (demo mode)
     self.invulnerable    = false
+    -- Landing detection
+    self._wasOnGround    = true        -- previous frame's onGround state
+    self._justLanded     = false       -- true for one frame after landing
+    -- Idle breathing animation
+    self._idleTime       = 0           -- time spent idle (not moving)
+    -- Death detection
+    self._prevLife       = 100         -- previous frame's life for death detection
+    self._justDied       = false       -- true for one frame when player dies
+    self._deathTime      = 0           -- time since death (for explosion animation)
     return self
 end
 
@@ -210,7 +219,18 @@ function Player:update(dt)
     end
 
     self:handleInput(dt)
+
+    -- Track previous ground state for landing detection
+    local wasOnGround = self.onGround
+
     Physics.updatePlayer(self, dt)
+
+    -- Detect landing (was in air, now on ground)
+    self._justLanded = false
+    if self.onGround and not wasOnGround then
+        self._justLanded = true
+    end
+    self._wasOnGround = self.onGround
 
     -- Dash timer
     if self.isDashing then
@@ -239,6 +259,55 @@ function Player:update(dt)
     -- Tick down hit flash
     if self.hitFlash > 0 then
         self.hitFlash = self.hitFlash - dt
+    end
+
+    -- Track idle time for breathing animation
+    local isMoving = math.abs(self.vx) > 10 or not self.onGround
+    if isMoving then
+        self._idleTime = 0
+    else
+        self._idleTime = self._idleTime + dt
+    end
+end
+
+-- Check if player just landed (and consume the event)
+function Player:consumeLanding()
+    if self._justLanded then
+        self._justLanded = false
+        return true
+    end
+    return false
+end
+
+-- Get idle breathing scale (1.0 to 1.02)
+function Player:getBreathingScale()
+    if self._idleTime < 0.3 then
+        return 1.0  -- Don't start breathing immediately
+    end
+    -- Gentle sine wave breathing
+    local breathCycle = math.sin((self._idleTime - 0.3) * 2.5) * 0.02
+    return 1.0 + math.max(0, breathCycle)
+end
+
+-- Check if player just died (and consume the event)
+function Player:consumeDeath()
+    if self._justDied then
+        self._justDied = false
+        return true
+    end
+    return false
+end
+
+-- Check for death transition (call this after life changes)
+function Player:checkDeath(dt)
+    if self._prevLife > 0 and self.life <= 0 then
+        self._justDied = true
+        self._deathTime = 0
+    end
+    self._prevLife = self.life
+    -- Track time since death
+    if self.life <= 0 and dt then
+        self._deathTime = self._deathTime + dt
     end
 end
 
@@ -283,8 +352,36 @@ function Player:getNetState()
     }
 end
 
-function Player:draw()
+function Player:draw(isGameOver)
     if not self.shapeKey then return end
+
+    -- Dead player handling
+    local isDead = self.life <= 0
+    if isDead then
+        -- During explosion animation (first 0.8 seconds), don't draw the player at all
+        if self._deathTime < 0.8 then
+            return
+        end
+        -- After explosion, draw as grey silhouette
+        local def = Shapes.get(self.shapeKey)
+        if def then
+            local w, h = def.width, def.height
+            -- Fade in the silhouette
+            local fadeIn = math.min(1, (self._deathTime - 0.8) / 0.3)
+            love.graphics.setColor(0.3, 0.3, 0.35, 0.6 * fadeIn)  -- Grey silhouette
+            if self.shapeKey == "circle" then
+                love.graphics.ellipse("fill", self.x, self.y, w/2, h/2)
+            elseif self.shapeKey == "triangle" then
+                love.graphics.polygon("fill",
+                    self.x, self.y - h/2,
+                    self.x - w/2, self.y + h/2,
+                    self.x + w/2, self.y + h/2)
+            else
+                love.graphics.rectangle("fill", self.x - w/2, self.y - h/2, w, h)
+            end
+        end
+        return  -- Don't draw anything else for dead players
+    end
 
     -- ── Buff auras (drawn behind the shape) ──
     local def = Shapes.get(self.shapeKey)
@@ -323,8 +420,9 @@ function Player:draw()
         end
     end
 
-    -- ── Shape ──
-    Shapes.drawShape(self.shapeKey, self.x, self.y, 1.0)
+    -- ── Shape with idle breathing ──
+    local breathScale = self:getBreathingScale()
+    Shapes.drawShape(self.shapeKey, self.x, self.y, breathScale)
 
     -- Hit flash overlay (white flash when damaged)
     if self.hitFlash > 0 then

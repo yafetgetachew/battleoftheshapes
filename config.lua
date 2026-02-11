@@ -10,7 +10,8 @@ local defaultConfig = {
     playerCount = "3",       -- "2" or "3"
     serverMode = "false",    -- "true" or "false" (dedicated server / relay mode)
     aimAssist = "true",      -- "true" or "false" (auto-aim at nearest enemy)
-    demoInvulnerable = "false" -- "true" or "false" (invulnerable in demo mode)
+    demoInvulnerable = "false", -- "true" or "false" (invulnerable in demo mode)
+    musicMuted = "false"     -- "true" or "false" (background music muted)
 }
 
 -- IP history (stored separately, not in defaultConfig)
@@ -153,6 +154,17 @@ end
 -- Set demo invulnerability
 function Config.setDemoInvulnerable(enabled)
     currentConfig.demoInvulnerable = enabled and "true" or "false"
+    Config.save()
+end
+
+-- Get music muted setting
+function Config.getMusicMuted()
+    return currentConfig.musicMuted == "true"
+end
+
+-- Set music muted
+function Config.setMusicMuted(muted)
+    currentConfig.musicMuted = muted and "true" or "false"
     Config.save()
 end
 

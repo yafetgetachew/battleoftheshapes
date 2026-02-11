@@ -5,6 +5,12 @@ local Sounds = {}
 
 local loaded = false
 local sfx = {}
+local bgMusicTracks = {}  -- Array of gameplay background music tracks
+local currentBgMusic = nil  -- Currently selected background track
+local menuMusic = nil  -- Menu music
+local musicMuted = false
+local gameplayMusicPlaying = false
+local menuMusicPlaying = false
 
 -- Generate a SoundData with a given generator function
 -- generator(t, duration) returns sample value in [-1, 1]
@@ -105,6 +111,129 @@ function Sounds.load()
         return (tone + noise + click) * env
     end)
     sfx.dash_impact:setVolume(0.45)
+
+    -- Jump: short bouncy "boing" with rising pitch
+    sfx.jump = generateSound(0.15, sr, function(t, dur)
+        local env = (1 - t / dur)
+        env = env * env
+        local freq = 300 + t * 800
+        local tone = math.sin(2 * math.pi * freq * t) * 0.5
+        local harmonic = math.sin(2 * math.pi * freq * 2 * t) * 0.2
+        return (tone + harmonic) * env
+    end)
+    sfx.jump:setVolume(0.25)
+
+    -- Land: soft thud when hitting ground
+    sfx.land = generateSound(0.12, sr, function(t, dur)
+        local env = (1 - t / dur)
+        env = env * env * env
+        local freq = 60 + (1 - t / dur) * 40
+        local tone = math.sin(2 * math.pi * freq * t) * 0.6
+        local noise = (math.random() * 2 - 1) * 0.2
+        return (tone + noise) * env
+    end)
+    sfx.land:setVolume(0.3)
+
+    -- Heartbeat: low rhythmic thump for low health warning
+    sfx.heartbeat = generateSound(0.3, sr, function(t, dur)
+        local env = 0
+        -- Double-beat pattern (lub-dub)
+        if t < 0.08 then
+            env = math.sin(t / 0.08 * math.pi)
+        elseif t > 0.12 and t < 0.18 then
+            env = math.sin((t - 0.12) / 0.06 * math.pi) * 0.7
+        end
+        local freq = 45
+        local tone = math.sin(2 * math.pi * freq * t)
+        return tone * env * 0.8
+    end)
+    sfx.heartbeat:setVolume(0.4)
+
+    -- Victory fanfare: triumphant ascending notes
+    sfx.victory = generateSound(1.0, sr, function(t, dur)
+        local env = 0
+        local freq = 0
+        -- Three ascending notes
+        if t < 0.25 then
+            env = math.min(1, t / 0.05) * (1 - (t / 0.25) * 0.3)
+            freq = 440  -- A4
+        elseif t < 0.5 then
+            local lt = t - 0.25
+            env = math.min(1, lt / 0.05) * (1 - (lt / 0.25) * 0.3)
+            freq = 554  -- C#5
+        elseif t < 0.85 then
+            local lt = t - 0.5
+            env = math.min(1, lt / 0.05) * (1 - (lt / 0.35) * 0.5)
+            freq = 659  -- E5
+        else
+            local lt = t - 0.85
+            env = (1 - lt / 0.15)
+            freq = 880  -- A5
+        end
+        local tone = math.sin(2 * math.pi * freq * t) * 0.4
+        local harmonic = math.sin(2 * math.pi * freq * 2 * t) * 0.15
+        local harmonic2 = math.sin(2 * math.pi * freq * 3 * t) * 0.08
+        return (tone + harmonic + harmonic2) * env
+    end)
+    sfx.victory:setVolume(0.5)
+
+    -- Death explosion: dramatic boom with descending pitch
+    sfx.death = generateSound(0.5, sr, function(t, dur)
+        local env = (1 - t / dur)
+        env = env * env
+        -- Low rumbling boom
+        local freq = 80 - t * 60
+        local boom = math.sin(2 * math.pi * freq * t) * 0.6
+        -- Noise burst
+        local noise = (math.random() * 2 - 1) * 0.4 * env * env
+        -- Initial crack
+        local crack = 0
+        if t < 0.03 then
+            crack = (1 - t / 0.03) * 0.8
+        end
+        return (boom + noise + crack) * env
+    end)
+    sfx.death:setVolume(0.6)
+
+    -- Menu navigation sound: short click/blip
+    sfx.menu_nav = generateSound(0.08, sr, function(t, dur)
+        local env = (1 - t / dur)
+        env = env * env
+        local freq = 600 + t * 400
+        local tone = math.sin(2 * math.pi * freq * t) * 0.4
+        local click = 0
+        if t < 0.01 then click = (1 - t / 0.01) * 0.3 end
+        return (tone + click) * env
+    end)
+    sfx.menu_nav:setVolume(0.3)
+
+    -- Menu select sound: confirmation beep
+    sfx.menu_select = generateSound(0.12, sr, function(t, dur)
+        local env = (1 - t / dur)
+        local freq = 800
+        local tone = math.sin(2 * math.pi * freq * t) * 0.4
+        local harmonic = math.sin(2 * math.pi * freq * 1.5 * t) * 0.2
+        return (tone + harmonic) * env
+    end)
+    sfx.menu_select:setVolume(0.35)
+
+    -- Load gameplay background music tracks (but don't auto-play)
+    local bgFiles = {"background.mp3", "background2.mp3"}
+    for _, filename in ipairs(bgFiles) do
+        if love.filesystem.getInfo(filename) then
+            local track = love.audio.newSource(filename, "stream")
+            track:setLooping(true)
+            track:setVolume(0.4)
+            table.insert(bgMusicTracks, track)
+        end
+    end
+
+    -- Load menu music
+    if love.filesystem.getInfo("menu.mp3") then
+        menuMusic = love.audio.newSource("menu.mp3", "stream")
+        menuMusic:setLooping(true)
+        menuMusic:setVolume(0.35)
+    end
 end
 
 function Sounds.play(name)
@@ -112,6 +241,86 @@ function Sounds.play(name)
     -- Clone so multiple can play simultaneously
     local s = sfx[name]:clone()
     s:play()
+end
+
+-- Start gameplay background music (randomly selects a track)
+function Sounds.startMusic()
+    if #bgMusicTracks == 0 or musicMuted then return end
+
+    -- Stop menu music if playing
+    if menuMusic and menuMusicPlaying then
+        menuMusic:stop()
+        menuMusicPlaying = false
+    end
+
+    -- Stop any currently playing gameplay music
+    if currentBgMusic then
+        currentBgMusic:stop()
+    end
+
+    -- Randomly select a track
+    local trackIndex = math.random(1, #bgMusicTracks)
+    currentBgMusic = bgMusicTracks[trackIndex]
+    currentBgMusic:play()
+    gameplayMusicPlaying = true
+end
+
+-- Stop gameplay background music (called when leaving gameplay)
+function Sounds.stopMusic()
+    if currentBgMusic then
+        currentBgMusic:stop()
+        gameplayMusicPlaying = false
+    end
+end
+
+-- Start menu music
+function Sounds.startMenuMusic()
+    if not menuMusic or musicMuted then return end
+
+    -- Stop gameplay music if playing
+    if currentBgMusic and gameplayMusicPlaying then
+        currentBgMusic:stop()
+        gameplayMusicPlaying = false
+    end
+
+    if not menuMusicPlaying then
+        menuMusic:play()
+        menuMusicPlaying = true
+    end
+end
+
+-- Stop menu music
+function Sounds.stopMenuMusic()
+    if menuMusic then
+        menuMusic:stop()
+        menuMusicPlaying = false
+    end
+end
+
+-- Set music muted state
+function Sounds.setMusicMuted(muted)
+    musicMuted = muted
+    if muted then
+        -- Stop all music
+        if currentBgMusic then
+            currentBgMusic:stop()
+        end
+        if menuMusic then
+            menuMusic:stop()
+        end
+    else
+        -- Resume appropriate music based on state
+        if gameplayMusicPlaying and currentBgMusic then
+            currentBgMusic:play()
+        elseif menuMusicPlaying and menuMusic then
+            menuMusic:play()
+        end
+    end
+end
+
+-- Get music muted state
+function Sounds.isMusicMuted()
+    return musicMuted
 end
 
 return Sounds
