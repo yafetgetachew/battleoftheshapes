@@ -92,8 +92,10 @@ local selection = nil
 local winner = nil
 local countdownTimer = 0
 local countdownValue = 3
+local restartTimer = nil
 local networkSyncTimer = 0
 local TICK_RATE = Network.TICK_RATE
+local processNetworkMessages, sendGameState, startCountdown, checkGameOver, restartGame
 
 -- ─────────────────────────────────────────────
 -- Logging
@@ -201,7 +203,14 @@ function love.update(dt)
         checkGameOver()
 
     elseif gameState == "gameover" then
-        -- Wait for restart (auto-restart after delay, or manual)
+	        -- Auto-restart after a delay (non-blocking)
+	        if restartTimer ~= nil then
+	            restartTimer = restartTimer - dt
+	            if restartTimer <= 0 then
+	                restartTimer = nil
+	                restartGame()
+	            end
+	        end
     end
 end
 
@@ -357,18 +366,17 @@ checkGameOver = function()
         end
         gameState = "gameover"
         Network.send("game_over", {winner = winner}, true)
-
-        -- Auto-restart after 5 seconds
-        love.timer.sleep(5)
-        restartGame()
+	        -- Auto-restart after 5 seconds (handled in love.update so we don't block networking)
+	        restartTimer = 5
     end
 end
 
 -- ─────────────────────────────────────────────
 -- Restart game (back to selection)
 -- ─────────────────────────────────────────────
-function restartGame()
+restartGame = function()
     winner = nil
+    restartTimer = nil
     Projectiles.clear()
     Lightning.reset()
     networkSyncTimer = 0

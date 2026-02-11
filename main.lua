@@ -11,6 +11,7 @@ local Network     = require("network")
 local Lightning   = require("lightning")
 local Sounds      = require("sounds")
 local Config      = require("config")
+local Dropbox     = require("dropbox")
 
 -- Game states: "splash", "menu", "settings", "connecting", "selection", "countdown", "playing", "gameover"
 -- (Note: "browsing" state was removed - use "Join by IP" instead)
@@ -23,12 +24,17 @@ local countdownValue
 local splashTimer = 0
 local networkSyncTimer = 0
 
+-- Demo mode state
+local demoMode = false     -- true when playing demo mode with bots
+local bots = {}            -- bot AI state for each bot player
+
 -- Menu state
-local menuChoice = 1       -- 1 = Host, 2 = Join, 3 = Settings
+local menuChoice = 1       -- 1 = Host, 2 = Join, 3 = Demo, 4 = Settings
 local joinAddress = ""
 local menuStatus = ""
-local settingsRow = 1      -- 1 = Control Scheme, 2 = Player Count, 3 = Server Mode
+local settingsRow = 1      -- 1 = Control Scheme, 2 = Player Count, 3 = Server Mode, 4 = Aim Assist
 local serverMode = false   -- true = dedicated server (host is relay only)
+local ipHistoryIndex = 0   -- 0 = typing new IP, 1+ = selecting from history
 
 -- Game over
 local winner = nil
@@ -40,6 +46,17 @@ local bgStars = {}
 local GAME_WIDTH = 1280
 local GAME_HEIGHT = 720
 local scaleX, scaleY, offsetX, offsetY = 1, 1, 0, 0
+
+-- Font cache: avoid allocating new Font objects every frame.
+local _fontCache = {}
+local function getFont(size)
+    local f = _fontCache[size]
+    if not f then
+        f = love.graphics.newFont(size)
+        _fontCache[size] = f
+    end
+    return f
+end
 
 -- ─────────────────────────────────────────────
 -- love.load
@@ -147,50 +164,61 @@ function love.update(dt)
         if countdownTimer <= 0 then
             gameState = "playing"
             Lightning.reset()
+            Dropbox.reset()
         end
 
     elseif gameState == "playing" then
-        Network.update(dt)
-        processNetworkMessages()
+        if demoMode then
+            -- Demo mode: use local bot AI update
+            updateDemoMode(dt)
+        else
+            Network.update(dt)
+            processNetworkMessages()
 
-        -- Update all players
-        for _, p in ipairs(players) do
-            if p.life > 0 then
-                p:update(dt)
-            end
-        end
-
-        -- Resolve collisions between all pairs
-        Physics.resolveAllCollisions(players, dt)
-
-        -- Update projectiles
-        Projectiles.update(dt, players)
-
-        -- Update lightning (host-authoritative)
-        if Network.getRole() == Network.ROLE_HOST or Network.getRole() == Network.ROLE_NONE then
-            Lightning.update(dt, players)
-        end
-
-        -- Network sync: host broadcasts all state, clients send their own state
-        if Network.getRole() ~= Network.ROLE_NONE then
-            networkSyncTimer = networkSyncTimer + dt
-            if networkSyncTimer >= Network.TICK_RATE then
-                networkSyncTimer = 0
-                if Network.getRole() == Network.ROLE_HOST then
-                    sendGameState()
-                else
-                    -- Client sends local player state to host
-                    sendClientState()
+            -- Update all players
+            for _, p in ipairs(players) do
+                if p.life > 0 then
+                    p:update(dt)
                 end
             end
+
+            -- Resolve collisions between all pairs
+            Physics.resolveAllCollisions(players, dt)
+
+            -- Update projectiles
+            Projectiles.update(dt, players)
+
+            -- Update lightning (host-authoritative)
+            if Network.getRole() == Network.ROLE_HOST or Network.getRole() == Network.ROLE_NONE then
+                Lightning.update(dt, players)
+            end
+
+            -- Update dropboxes
+            Dropbox.update(dt, players)
+
+            -- Network sync: host broadcasts all state, clients send their own state
+            if Network.getRole() ~= Network.ROLE_NONE then
+                networkSyncTimer = networkSyncTimer + dt
+                if networkSyncTimer >= Network.TICK_RATE then
+                    networkSyncTimer = 0
+                    if Network.getRole() == Network.ROLE_HOST then
+                        sendGameState()
+                    else
+                        -- Client sends local player state to host
+                        sendClientState()
+                    end
+                end
+            end
+
+            -- Check for game over (last player standing)
+            checkGameOver()
         end
 
-        -- Check for game over (last player standing)
-        checkGameOver()
-
     elseif gameState == "gameover" then
-        Network.update(dt)
-        processNetworkMessages()
+        if not demoMode then
+            Network.update(dt)
+            processNetworkMessages()
+        end
     end
 end
 
@@ -218,8 +246,7 @@ function love.draw()
         selection:draw(W, H, Config.getControls())
         if serverMode then
             -- Server mode overlay on selection screen
-            local overlayFont = love.graphics.newFont(16)
-            love.graphics.setFont(overlayFont)
+	        love.graphics.setFont(getFont(16))
             love.graphics.setColor(1, 1, 0.4, 0.9)
             love.graphics.printf("SERVER MODE — " .. menuStatus, 0, H - 40, W, "center")
         end
@@ -238,6 +265,9 @@ function love.draw()
 
         -- ── Projectiles ──
         Projectiles.draw()
+
+        -- ── Dropboxes ──
+        Dropbox.draw()
 
         -- ── Lightning ──
         Lightning.draw(W, H)
@@ -259,6 +289,8 @@ function love.draw()
         if gameState == "playing" then
             if serverMode then
                 drawServerHint(W, H)
+            elseif demoMode then
+                drawDemoHint(W, H)
             else
                 drawControlsHint(W, H)
             end
@@ -440,8 +472,7 @@ function drawCountdown(W, H)
     love.graphics.setColor(0, 0, 0, 0.5)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
-    local bigFont = love.graphics.newFont(72)
-    love.graphics.setFont(bigFont)
+	love.graphics.setFont(getFont(72))
     love.graphics.setColor(1, 1, 1, 0.9)
 
     local text = countdownValue > 0 and tostring(countdownValue) or "FIGHT!"
@@ -449,8 +480,7 @@ function drawCountdown(W, H)
 end
 
 function drawControlsHint(W, H)
-    local hintFont = love.graphics.newFont(11)
-    love.graphics.setFont(hintFont)
+	love.graphics.setFont(getFont(11))
     love.graphics.setColor(1, 1, 1, 0.25)
     local pid = Network.getLocalPlayerId()
     local hint = "P" .. pid .. ": A/D move · Space jump · W cast    |    ESC menu"
@@ -458,11 +488,17 @@ function drawControlsHint(W, H)
 end
 
 function drawServerHint(W, H)
-    local hintFont = love.graphics.newFont(11)
-    love.graphics.setFont(hintFont)
+	love.graphics.setFont(getFont(11))
     love.graphics.setColor(1, 1, 0.4, 0.35)
     local connected = Network.getConnectedCount() - 1  -- subtract host itself
     local hint = "SERVER MODE — " .. connected .. "/" .. maxPlayers .. " players    |    ESC menu"
+    love.graphics.printf(hint, 0, H - 22, W, "center")
+end
+
+function drawDemoHint(W, H)
+	love.graphics.setFont(getFont(11))
+    love.graphics.setColor(0.4, 1, 0.6, 0.35)
+    local hint = "DEMO MODE — P1: A/D move · Space jump · W cast    |    ESC menu"
     love.graphics.printf(hint, 0, H - 22, W, "center")
 end
 
@@ -475,19 +511,16 @@ function drawSplash(W, H)
 
     -- Title with pulsing effect
     local pulse = 0.7 + 0.3 * math.sin(splashTimer * 2.5)
-    local bigFont = love.graphics.newFont(64)
-    love.graphics.setFont(bigFont)
+	love.graphics.setFont(getFont(64))
     love.graphics.setColor(1.0, 0.85, 0.2, pulse)
     love.graphics.printf("BATTLE OF THE SHAPES", 0, H / 2 - 80, W, "center")
 
-    local subFont = love.graphics.newFont(24)
-    love.graphics.setFont(subFont)
+	love.graphics.setFont(getFont(24))
     love.graphics.setColor(0.7, 0.7, 0.9, pulse * 0.8)
     love.graphics.printf("B.O.T.S", 0, H / 2 + 10, W, "center")
 
     if splashTimer > 1.0 then
-        local smallFont = love.graphics.newFont(16)
-        love.graphics.setFont(smallFont)
+	    love.graphics.setFont(getFont(16))
         local blink = 0.4 + 0.6 * math.sin(splashTimer * 4)
         love.graphics.setColor(1, 1, 1, blink)
         love.graphics.printf("Press any key to continue", 0, H / 2 + 80, W, "center")
@@ -500,10 +533,10 @@ end
 function handleMenuKey(key)
     if key == "up" or key == "w" then
         menuChoice = menuChoice - 1
-        if menuChoice < 1 then menuChoice = 3 end
+        if menuChoice < 1 then menuChoice = 4 end
     elseif key == "down" or key == "s" then
         menuChoice = menuChoice + 1
-        if menuChoice > 3 then menuChoice = 1 end
+        if menuChoice > 4 then menuChoice = 1 end
     elseif key == "return" or key == "space" then
         if menuChoice == 1 then
             startAsHost()
@@ -513,6 +546,9 @@ function handleMenuKey(key)
             menuStatus = "Enter host IP address then press Enter:"
             joinAddress = ""
         elseif menuChoice == 3 then
+            -- Demo Mode
+            startDemoMode()
+        elseif menuChoice == 4 then
             -- Settings
             gameState = "settings"
         end
@@ -523,13 +559,11 @@ function drawMenu(W, H)
     love.graphics.setColor(0.06, 0.06, 0.1)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
-    local titleFont = love.graphics.newFont(42)
-    love.graphics.setFont(titleFont)
+	love.graphics.setFont(getFont(42))
     love.graphics.setColor(1.0, 0.85, 0.2)
     love.graphics.printf("B.O.T.S", 0, 80, W, "center")
 
-    local subFont = love.graphics.newFont(18)
-    love.graphics.setFont(subFont)
+	love.graphics.setFont(getFont(18))
     love.graphics.setColor(0.7, 0.7, 0.9)
     local pc = Config.getPlayerCount()
     local subtitle = "Battle of the Shapes - " .. pc .. " Player LAN"
@@ -538,32 +572,36 @@ function drawMenu(W, H)
     end
     love.graphics.printf(subtitle, 0, 140, W, "center")
 
-    local menuFont = love.graphics.newFont(28)
-    love.graphics.setFont(menuFont)
+	love.graphics.setFont(getFont(28))
     local menuY = 240
     local hostLabel = Config.getServerMode() and "Host Server" or "Host Game"
-    local options = {hostLabel, "Join by IP", "Settings"}
+    local options = {hostLabel, "Join by IP", "Demo Mode", "Settings"}
     for i, opt in ipairs(options) do
         if i == menuChoice then
             love.graphics.setColor(1.0, 1.0, 0.4)
-            love.graphics.printf("> " .. opt .. " <", 0, menuY + (i - 1) * 55, W, "center")
+            love.graphics.printf("> " .. opt .. " <", 0, menuY + (i - 1) * 50, W, "center")
         else
             love.graphics.setColor(0.6, 0.6, 0.6)
-            love.graphics.printf(opt, 0, menuY + (i - 1) * 55, W, "center")
+            love.graphics.printf(opt, 0, menuY + (i - 1) * 50, W, "center")
         end
     end
 
-    local hintFont = love.graphics.newFont(14)
-    love.graphics.setFont(hintFont)
-    love.graphics.setColor(0.5, 0.5, 0.5)
-    love.graphics.printf("Use ↑/↓ to select, Enter to confirm", 0, H - 60, W, "center")
+	love.graphics.setFont(getFont(14))
+	-- Show status/errors on the menu (e.g. host bind failures, disconnect messages).
+	if menuStatus and #menuStatus > 0 then
+		love.graphics.setColor(1.0, 0.45, 0.45)
+		love.graphics.printf(menuStatus, 0, H - 90, W, "center")
+	end
+
+	love.graphics.setColor(0.5, 0.5, 0.5)
+	love.graphics.printf("Use ↑/↓ to select, Enter to confirm", 0, H - 60, W, "center")
 end
 
 -- ─────────────────────────────────────────────
 -- Settings Screen
 -- ─────────────────────────────────────────────
 function handleSettingsKey(key)
-    local maxRows = 3
+    local maxRows = 4
     if key == "up" or key == "w" then
         settingsRow = settingsRow - 1
         if settingsRow < 1 then settingsRow = maxRows end
@@ -590,6 +628,9 @@ function handleSettingsKey(key)
         elseif settingsRow == 3 then
             -- Toggle server mode
             Config.setServerMode(not Config.getServerMode())
+        elseif settingsRow == 4 then
+            -- Toggle aim assist
+            Config.setAimAssist(not Config.getAimAssist())
         end
     elseif key == "backspace" then
         gameState = "menu"
@@ -600,14 +641,13 @@ function drawSettings(W, H)
     love.graphics.setColor(0.06, 0.06, 0.1)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
-    local titleFont = love.graphics.newFont(36)
-    love.graphics.setFont(titleFont)
+	love.graphics.setFont(getFont(36))
     love.graphics.setColor(1.0, 0.85, 0.2)
     love.graphics.printf("Settings", 0, 80, W, "center")
 
-    local labelFont = love.graphics.newFont(24)
-    local valueFont = love.graphics.newFont(32)
-    local detailFont = love.graphics.newFont(18)
+	local labelFont = getFont(24)
+	local valueFont = getFont(32)
+	local detailFont = getFont(18)
 
     -- Row 1: Control Scheme
     local row1Y = 170
@@ -673,7 +713,7 @@ function drawSettings(W, H)
     end
 
     -- Row 3: Server Mode
-    local row3Y = 440
+    local row3Y = 390
     love.graphics.setFont(labelFont)
     if settingsRow == 3 then
         love.graphics.setColor(1.0, 1.0, 0.4)
@@ -690,26 +730,61 @@ function drawSettings(W, H)
         else
             love.graphics.setColor(0.3, 0.7, 0.3)
         end
-        love.graphics.printf("< ON >", 0, row3Y + 35, W, "center")
+        love.graphics.printf("< ON >", 0, row3Y + 30, W, "center")
     else
         if settingsRow == 3 then
             love.graphics.setColor(1.0, 0.5, 0.4)
         else
             love.graphics.setColor(0.7, 0.4, 0.3)
         end
-        love.graphics.printf("< OFF >", 0, row3Y + 35, W, "center")
+        love.graphics.printf("< OFF >", 0, row3Y + 30, W, "center")
     end
 
     love.graphics.setFont(detailFont)
     love.graphics.setColor(0.5, 0.5, 0.5)
     if sm then
-        love.graphics.printf("Host is relay only — does not play", 0, row3Y + 72, W, "center")
+        love.graphics.printf("Host is relay only — does not play", 0, row3Y + 60, W, "center")
     else
-        love.graphics.printf("Host joins the game as a player", 0, row3Y + 72, W, "center")
+        love.graphics.printf("Host joins the game as a player", 0, row3Y + 60, W, "center")
     end
 
-    local hintFont = love.graphics.newFont(14)
-    love.graphics.setFont(hintFont)
+    -- Row 4: Aim Assist
+    local row4Y = 500
+    love.graphics.setFont(labelFont)
+    if settingsRow == 4 then
+        love.graphics.setColor(1.0, 1.0, 0.4)
+    else
+        love.graphics.setColor(0.6, 0.6, 0.6)
+    end
+    love.graphics.printf("Aim Assist:", 0, row4Y, W, "center")
+
+    love.graphics.setFont(valueFont)
+    local aa = Config.getAimAssist()
+    if aa then
+        if settingsRow == 4 then
+            love.graphics.setColor(0.4, 1.0, 0.4)
+        else
+            love.graphics.setColor(0.3, 0.7, 0.3)
+        end
+        love.graphics.printf("< ON >", 0, row4Y + 30, W, "center")
+    else
+        if settingsRow == 4 then
+            love.graphics.setColor(1.0, 0.5, 0.4)
+        else
+            love.graphics.setColor(0.7, 0.4, 0.3)
+        end
+        love.graphics.printf("< OFF >", 0, row4Y + 30, W, "center")
+    end
+
+    love.graphics.setFont(detailFont)
+    love.graphics.setColor(0.5, 0.5, 0.5)
+    if aa then
+        love.graphics.printf("Fireballs auto-target nearest enemy", 0, row4Y + 60, W, "center")
+    else
+        love.graphics.printf("Fireballs shoot in facing direction", 0, row4Y + 60, W, "center")
+    end
+
+	love.graphics.setFont(getFont(14))
     love.graphics.setColor(0.5, 0.5, 0.5)
     love.graphics.printf("↑/↓ select  •  ←/→ change  •  Backspace to go back", 0, H - 60, W, "center")
 end
@@ -718,22 +793,56 @@ function drawConnecting(W, H)
     love.graphics.setColor(0.06, 0.06, 0.1)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
-    local font = love.graphics.newFont(20)
-    love.graphics.setFont(font)
+    love.graphics.setFont(getFont(20))
     love.graphics.setColor(1, 1, 1)
-    love.graphics.printf(menuStatus, 0, H / 2 - 60, W, "center")
+    love.graphics.printf(menuStatus, 0, 80, W, "center")
 
-    local addrFont = love.graphics.newFont(28)
-    love.graphics.setFont(addrFont)
-    love.graphics.setColor(1.0, 1.0, 0.4)
+    -- IP input area
+    local inputY = 140
+    love.graphics.setFont(getFont(16))
+    love.graphics.setColor(0.6, 0.6, 0.6)
+    love.graphics.printf("Enter IP address:", 0, inputY, W, "center")
+
+    love.graphics.setFont(getFont(28))
+    if ipHistoryIndex == 0 then
+        love.graphics.setColor(1.0, 1.0, 0.4)
+    else
+        love.graphics.setColor(0.5, 0.5, 0.5)
+    end
     local display = joinAddress
     if #display == 0 then display = "_" end
-    love.graphics.printf(display, 0, H / 2, W, "center")
+    love.graphics.printf(display, 0, inputY + 30, W, "center")
 
-    local hintFont = love.graphics.newFont(14)
-    love.graphics.setFont(hintFont)
+    -- IP History
+    local history = Config.getIPHistory()
+    if #history > 0 then
+        local historyY = inputY + 90
+        love.graphics.setFont(getFont(16))
+        love.graphics.setColor(0.6, 0.6, 0.6)
+        love.graphics.printf("Recent connections (↑/↓ to select):", 0, historyY, W, "center")
+
+        love.graphics.setFont(getFont(22))
+        local maxDisplay = math.min(#history, 5)  -- Show max 5 entries
+        for i = 1, maxDisplay do
+            local y = historyY + 30 + (i - 1) * 35
+            if i == ipHistoryIndex then
+                love.graphics.setColor(1.0, 1.0, 0.4)
+                love.graphics.printf("> " .. history[i] .. " <", 0, y, W, "center")
+            else
+                love.graphics.setColor(0.7, 0.7, 0.7)
+                love.graphics.printf(history[i], 0, y, W, "center")
+            end
+        end
+        if #history > maxDisplay then
+            love.graphics.setFont(getFont(14))
+            love.graphics.setColor(0.5, 0.5, 0.5)
+            love.graphics.printf("... and " .. (#history - maxDisplay) .. " more", 0, historyY + 30 + maxDisplay * 35, W, "center")
+        end
+    end
+
+    love.graphics.setFont(getFont(14))
     love.graphics.setColor(0.5, 0.5, 0.5)
-    love.graphics.printf("Backspace to go back to menu", 0, H - 40, W, "center")
+    love.graphics.printf("Enter to connect  •  Backspace to go back", 0, H - 40, W, "center")
 end
 
 
@@ -792,17 +901,59 @@ function love.textinput(text)
     end
 end
 
--- Override keypressed for connecting state - handle Enter/Backspace
+-- Override keypressed for connecting state - handle Enter/Backspace/arrows
 function handleConnectingKey(key)
-    if key == "return" and #joinAddress > 0 then
-        startAsClient(joinAddress)
+    local history = Config.getIPHistory()
+    local historyCount = #history
+
+    if key == "return" then
+        local addressToUse = ""
+        if ipHistoryIndex > 0 and ipHistoryIndex <= historyCount then
+            -- Use selected history IP
+            addressToUse = history[ipHistoryIndex]
+        else
+            -- Use typed address
+            addressToUse = joinAddress
+        end
+        if #addressToUse > 0 then
+            -- Store the address we're connecting to (for saving to history on success)
+            joinAddress = addressToUse
+            startAsClient(addressToUse)
+        end
+    elseif key == "up" then
+        -- Navigate up in history (or wrap to bottom)
+        if historyCount > 0 then
+            if ipHistoryIndex == 0 then
+                ipHistoryIndex = historyCount
+            else
+                ipHistoryIndex = ipHistoryIndex - 1
+            end
+        end
+    elseif key == "down" then
+        -- Navigate down in history (or wrap to typing mode)
+        if historyCount > 0 then
+            if ipHistoryIndex >= historyCount then
+                ipHistoryIndex = 0
+            else
+                ipHistoryIndex = ipHistoryIndex + 1
+            end
+        end
     elseif key == "backspace" then
-        if #joinAddress > 0 then
+        if ipHistoryIndex > 0 then
+            -- Exit history selection, go back to typing
+            ipHistoryIndex = 0
+        elseif #joinAddress > 0 then
             joinAddress = joinAddress:sub(1, -2)
         else
             Network.stop()
             gameState = "menu"
             menuStatus = ""
+            ipHistoryIndex = 0
+        end
+    else
+        -- If typing, reset history selection
+        if ipHistoryIndex > 0 and key:match("^[%w%.:]$") then
+            ipHistoryIndex = 0
         end
     end
 end
@@ -834,6 +985,11 @@ function processNetworkMessages()
             -- Set local player
             players[pid].isRemote = false
             players[pid].controls = Config.getControls()
+
+            -- Save IP to history on successful connection
+            if #joinAddress > 0 then
+                Config.addIPToHistory(joinAddress)
+            end
 
             selection = Selection.new(pid, maxPlayers)
             gameState = "selection"
@@ -943,7 +1099,7 @@ function processNetworkMessages()
 
         elseif msg.type == "game_over" then
             local data = msg.data
-            if data and data.winner then
+            if data and data.winner ~= nil then
                 winner = data.winner
                 gameState = "gameover"
             end
@@ -953,6 +1109,7 @@ function processNetworkMessages()
             winner = nil
             Projectiles.clear()
             Lightning.reset()
+            Dropbox.reset()
             selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
             gameState = "selection"
 
@@ -993,6 +1150,47 @@ function processNetworkMessages()
                     })
                 end
             end
+
+        elseif msg.type == "dropbox_sync" then
+            -- Client receives dropbox state from host
+            if Network.getRole() == Network.ROLE_CLIENT then
+                local data = msg.data
+                if data then
+                    local newBoxes = {}
+                    local newCharges = {}
+                    local bc = data.bc or 0
+                    local cc = data.cc or 0
+                    for i = 1, bc do
+                        local bx = data["b" .. i .. "x"]
+                        local by = data["b" .. i .. "y"]
+                        if bx and by then
+                            newBoxes[i] = {
+                                x = bx,
+                                y = by,
+                                vx = data["b" .. i .. "vx"] or 0,
+                                vy = data["b" .. i .. "vy"] or 0,
+                                onGround = (data["b" .. i .. "og"] or 0) == 1
+                            }
+                        end
+                    end
+                    for i = 1, cc do
+                        local cx = data["c" .. i .. "x"]
+                        local cy = data["c" .. i .. "y"]
+                        if cx and cy then
+                            newCharges[i] = {
+                                x = cx,
+                                y = cy,
+                                age = data["c" .. i .. "a"] or 0
+                            }
+                        end
+                    end
+                    Dropbox.setState({
+                        boxes = newBoxes,
+                        charges = newCharges,
+                        spawnTimer = data.st or 10
+                    })
+                end
+            end
         end
     end
 end
@@ -1028,6 +1226,27 @@ function sendGameState()
         ldata["w" .. i .. "a"] = warning.age
     end
     Network.send("lightning_sync", ldata, false)
+
+    -- Send dropbox state to clients (single consolidated message)
+    local dropboxState = Dropbox.getState()
+    local ddata = {
+        bc = #dropboxState.boxes,
+        cc = #dropboxState.charges,
+        st = dropboxState.spawnTimer
+    }
+    for i, box in ipairs(dropboxState.boxes) do
+        ddata["b" .. i .. "x"] = box.x
+        ddata["b" .. i .. "y"] = box.y
+        ddata["b" .. i .. "vx"] = box.vx
+        ddata["b" .. i .. "vy"] = box.vy
+        ddata["b" .. i .. "og"] = box.onGround and 1 or 0
+    end
+    for i, charge in ipairs(dropboxState.charges) do
+        ddata["c" .. i .. "x"] = charge.x
+        ddata["c" .. i .. "y"] = charge.y
+        ddata["c" .. i .. "a"] = charge.age
+    end
+    Network.send("dropbox_sync", ddata, false)
 end
 
 -- Client sends its own player state to the host
@@ -1061,16 +1280,22 @@ function applyGameState(data)
     else
         -- Local player: only apply authoritative life from host
         -- (host computes lightning damage that client can't compute locally)
-        if data.life then
+	        if data.life ~= nil then
             players[pid].life = data.life
         end
     end
 end
 
 -- ─────────────────────────────────────────────
--- Game over check
+-- Game over check (host-authoritative)
 -- ─────────────────────────────────────────────
 function checkGameOver()
+    -- Only host (or solo/demo mode) determines game over
+    -- Clients receive game_over message from host
+    if Network.getRole() == Network.ROLE_CLIENT then
+        return  -- clients don't check, they wait for host message
+    end
+
     local alive = {}
     for _, p in ipairs(players) do
         if p.life > 0 then
@@ -1095,8 +1320,7 @@ function drawGameOver(W, H)
     love.graphics.setColor(0, 0, 0, 0.6)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
-    local bigFont = love.graphics.newFont(56)
-    love.graphics.setFont(bigFont)
+	love.graphics.setFont(getFont(56))
     love.graphics.setColor(1, 1, 0.3)
     if winner and winner > 0 then
         love.graphics.printf("Player " .. winner .. " Wins!", 0, H / 2 - 60, W, "center")
@@ -1104,8 +1328,7 @@ function drawGameOver(W, H)
         love.graphics.printf("Draw!", 0, H / 2 - 60, W, "center")
     end
 
-    local smallFont = love.graphics.newFont(20)
-    love.graphics.setFont(smallFont)
+	love.graphics.setFont(getFont(20))
     love.graphics.setColor(1, 1, 1, 0.7)
     love.graphics.printf("Press R to restart", 0, H / 2 + 20, W, "center")
 end
@@ -1120,21 +1343,30 @@ function returnToMenu()
     winner = nil
     Projectiles.clear()
     Lightning.reset()
+    Dropbox.reset()
     gameState = "menu"
     menuStatus = ""
     menuChoice = 1
     joinAddress = ""
     networkSyncTimer = 0
     serverMode = false
+    demoMode = false
+    bots = {}
 end
 
 function getLocalPlayer()
     if serverMode then return nil end
+    if demoMode then return players[1] end
     local pid = Network.getLocalPlayerId()
     return players[pid]
 end
 
 function restartGame()
+    if demoMode then
+        -- Demo mode: restart with same setup
+        restartDemoMode()
+        return
+    end
     if Network.getRole() == Network.ROLE_NONE then
         -- Solo / no network: return to menu
         gameState = "menu"
@@ -1147,6 +1379,7 @@ function restartGame()
         winner = nil
         Projectiles.clear()
         Lightning.reset()
+        Dropbox.reset()
         selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
         gameState = "selection"
         -- Host tells clients to restart
@@ -1154,4 +1387,147 @@ function restartGame()
             Network.send("game_restart", {}, true)
         end
     end
+end
+
+-- ─────────────────────────────────────────────
+-- Demo Mode with Bot AI
+-- ─────────────────────────────────────────────
+
+-- Bot AI state structure
+local function createBotState(playerId)
+    return {
+        playerId = playerId,
+        jumpTimer = math.random() * 2 + 0.5,      -- time until next jump
+        castTimer = math.random() * 3 + 1,        -- time until next cast
+        moveTimer = math.random() * 1.5 + 0.5,    -- time until direction change
+        moveDir = math.random() < 0.5 and -1 or 1 -- current move direction
+    }
+end
+
+-- Update bot AI
+local function updateBotAI(bot, player, dt, allPlayers)
+    if player.life <= 0 then return end
+
+    -- Random jumping
+    bot.jumpTimer = bot.jumpTimer - dt
+    if bot.jumpTimer <= 0 then
+        player:jump()
+        bot.jumpTimer = math.random() * 2.5 + 0.8  -- 0.8-3.3 seconds between jumps
+    end
+
+    -- Random casting (at nearest enemy)
+    bot.castTimer = bot.castTimer - dt
+    if bot.castTimer <= 0 then
+        player:castAbilityAtNearest(allPlayers)
+        bot.castTimer = math.random() * 2 + 0.5  -- 0.5-2.5 seconds between casts
+    end
+
+    -- Random movement direction changes
+    bot.moveTimer = bot.moveTimer - dt
+    if bot.moveTimer <= 0 then
+        bot.moveDir = math.random() < 0.5 and -1 or 1
+        bot.moveTimer = math.random() * 2 + 0.5  -- 0.5-2.5 seconds per direction
+    end
+
+    -- Apply movement
+    player.vx = player.speed * bot.moveDir
+    player.facingRight = bot.moveDir > 0
+
+    -- Avoid walls - reverse direction if near edge
+    if player.x < 100 then
+        bot.moveDir = 1
+        player.facingRight = true
+    elseif player.x > 1180 then
+        bot.moveDir = -1
+        player.facingRight = false
+    end
+end
+
+-- Start demo mode
+function startDemoMode()
+    demoMode = true
+    maxPlayers = 3
+    serverMode = false
+
+    -- Create players: P1 is local human, P2 and P3 are bots
+    players = {}
+    players[1] = Player.new(1, Config.getControls())
+    players[2] = Player.new(2, nil)
+    players[2].isRemote = false  -- not remote, but AI controlled
+    players[3] = Player.new(3, nil)
+    players[3].isRemote = false
+
+    -- Assign random shapes to bots
+    local Shapes = require("shapes")
+    local shapeKeys = Shapes.order
+    local humanShape = shapeKeys[math.random(#shapeKeys)]
+    local bot1Shape = shapeKeys[math.random(#shapeKeys)]
+    local bot2Shape = shapeKeys[math.random(#shapeKeys)]
+
+    players[1]:setShape(humanShape)
+    players[2]:setShape(bot1Shape)
+    players[3]:setShape(bot2Shape)
+
+    -- Create bot AI states
+    bots = {
+        [2] = createBotState(2),
+        [3] = createBotState(3)
+    }
+
+    -- Spawn positions
+    Projectiles.clear()
+    local stageLeft = 250
+    local stageRight = 1030
+    local stageMiddle = (stageLeft + stageRight) / 2
+    players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
+    players[2]:spawn(stageMiddle, Physics.GROUND_Y - players[2].shapeHeight / 2)
+    players[3]:spawn(stageRight, Physics.GROUND_Y - players[3].shapeHeight / 2)
+
+    -- Start countdown
+    countdownTimer = 3.0
+    countdownValue = 3
+    gameState = "countdown"
+    Lightning.reset()
+    Dropbox.reset()
+end
+
+-- Restart demo mode
+function restartDemoMode()
+    winner = nil
+    Projectiles.clear()
+    Lightning.reset()
+    Dropbox.reset()
+    startDemoMode()
+end
+
+-- Update demo mode (called from love.update when demoMode is true)
+function updateDemoMode(dt)
+    -- Update all players
+    for _, p in ipairs(players) do
+        if p.life > 0 then
+            p:update(dt)
+        end
+    end
+
+    -- Update bot AI
+    for botId, bot in pairs(bots) do
+        if players[botId] then
+            updateBotAI(bot, players[botId], dt, players)
+        end
+    end
+
+    -- Resolve collisions
+    Physics.resolveAllCollisions(players, dt)
+
+    -- Update projectiles
+    Projectiles.update(dt, players)
+
+    -- Update lightning
+    Lightning.update(dt, players)
+
+    -- Update dropboxes
+    Dropbox.update(dt, players)
+
+    -- Check for game over
+    checkGameOver()
 end

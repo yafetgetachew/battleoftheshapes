@@ -2,6 +2,7 @@
 -- Handles gravity, ground collision, and player-vs-player collision
 
 local Sounds  = require("sounds")
+local Network = require("network")
 
 local Physics = {}
 
@@ -90,8 +91,10 @@ function Physics.resolvePlayerCollision(p1, p2, dt)
     if overlapX <= 0 or overlapY <= 0 then return end
 
     -- Apply collision damage to the lower player (higher Y = lower on screen)
+    -- Only host (or solo/demo) applies damage; clients receive authoritative life from host
+    local isAuthority = Network.getRole() ~= Network.ROLE_CLIENT
     local lowerPlayer = (p1.y > p2.y) and p1 or p2
-    if lowerPlayer.life and lowerPlayer.life > 0 then
+    if isAuthority and lowerPlayer.life and lowerPlayer.life > 0 then
         local prevLife = lowerPlayer.life
         lowerPlayer.life = math.max(0, lowerPlayer.life - Physics.COLLISION_DAMAGE * dt)
         -- Play hurt sound on significant damage ticks (not every frame)

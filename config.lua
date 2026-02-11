@@ -8,8 +8,12 @@ local Config = {}
 local defaultConfig = {
     controlScheme = "wasd",  -- "wasd" or "arrows"
     playerCount = "3",       -- "2" or "3"
-    serverMode = "false"     -- "true" or "false" (dedicated server / relay mode)
+    serverMode = "false",    -- "true" or "false" (dedicated server / relay mode)
+    aimAssist = "true"       -- "true" or "false" (auto-aim at nearest enemy)
 }
+
+-- IP history (stored separately, not in defaultConfig)
+local ipHistory = {}
 
 -- Current configuration
 local currentConfig = {}
@@ -30,8 +34,10 @@ Config.CONTROL_SCHEMES = {
     }
 }
 
--- Config file path
+-- Config file paths
 local CONFIG_FILE = "bots_config.txt"
+local IP_HISTORY_FILE = "bots_ip_history.txt"
+local MAX_IP_HISTORY = 10  -- Maximum number of IPs to remember
 
 -- Load configuration from file
 function Config.load()
@@ -39,8 +45,8 @@ function Config.load()
     for k, v in pairs(defaultConfig) do
         currentConfig[k] = v
     end
-    
-    -- Try to load from file
+
+    -- Try to load config from file
     if love.filesystem.getInfo(CONFIG_FILE) then
         local contents = love.filesystem.read(CONFIG_FILE)
         if contents then
@@ -54,7 +60,21 @@ function Config.load()
             end
         end
     end
-    
+
+    -- Load IP history
+    ipHistory = {}
+    if love.filesystem.getInfo(IP_HISTORY_FILE) then
+        local contents = love.filesystem.read(IP_HISTORY_FILE)
+        if contents then
+            for line in contents:gmatch("[^\r\n]+") do
+                local ip = line:match("^%s*(.-)%s*$")  -- trim whitespace
+                if ip and #ip > 0 then
+                    table.insert(ipHistory, ip)
+                end
+            end
+        end
+    end
+
     return currentConfig
 end
 
@@ -111,6 +131,46 @@ end
 function Config.setServerMode(enabled)
     currentConfig.serverMode = enabled and "true" or "false"
     Config.save()
+end
+
+-- Get aim assist setting
+function Config.getAimAssist()
+    return currentConfig.aimAssist ~= "false"  -- default true
+end
+
+-- Set aim assist
+function Config.setAimAssist(enabled)
+    currentConfig.aimAssist = enabled and "true" or "false"
+    Config.save()
+end
+
+-- Get IP history (most recent first)
+function Config.getIPHistory()
+    return ipHistory
+end
+
+-- Add IP to history (moves to front if already exists)
+function Config.addIPToHistory(ip)
+    if not ip or #ip == 0 then return end
+
+    -- Remove if already exists
+    for i = #ipHistory, 1, -1 do
+        if ipHistory[i] == ip then
+            table.remove(ipHistory, i)
+        end
+    end
+
+    -- Add to front
+    table.insert(ipHistory, 1, ip)
+
+    -- Trim to max size
+    while #ipHistory > MAX_IP_HISTORY do
+        table.remove(ipHistory)
+    end
+
+    -- Save to file
+    local contents = table.concat(ipHistory, "\n")
+    love.filesystem.write(IP_HISTORY_FILE, contents)
 end
 
 return Config

@@ -4,6 +4,8 @@
 
 local Physics = require("physics")
 local Sounds  = require("sounds")
+local Dropbox = require("dropbox")
+local Network = require("network")
 
 local Projectiles = {}
 
@@ -42,6 +44,28 @@ function Projectiles.spawnFireball(caster, target)
     return true
 end
 
+-- Spawn a fireball in a specific direction (for aim assist OFF)
+function Projectiles.spawnFireballDirectional(caster, facingRight)
+    if caster.will < Projectiles.WILL_COST then return false end
+    caster.will = caster.will - Projectiles.WILL_COST
+    local dir = facingRight and 1 or -1
+    local proj = {
+        type     = "fireball",
+        owner    = caster.id,
+        targetId = nil,  -- no specific target
+        x        = caster.x + dir * (caster.shapeWidth / 2 + 10),
+        y        = caster.y,
+        vx       = Projectiles.FIREBALL_SPEED * dir,
+        vy       = 0,
+        radius   = Projectiles.FIREBALL_RADIUS,
+        age      = 0,
+        particles = {}
+    }
+    table.insert(active, proj)
+    Sounds.play("fireball_cast")
+    return true
+end
+
 -- ─────────────────────────────────────────────
 -- Update
 -- ─────────────────────────────────────────────
@@ -56,20 +80,36 @@ function Projectiles.update(dt, players)
         -- Spawn trail particles
         Projectiles._spawnTrail(p)
 
-        -- Check collision with target player
+        -- Check collision with dropboxes first
         local hit = false
-        for _, player in ipairs(players) do
-            if player.id ~= p.owner then
-                if Projectiles._hitTest(p, player) then
-                    player.life = math.max(0, player.life - Projectiles.DAMAGE)
-                    player.hitFlash = 0.25   -- flash duration
-                    Projectiles._spawnHitEffect(p.x, p.y, p.type)
-                    Sounds.play("fireball_hit")
-                    hit = true
-                    break
-                end
-            end
+        if Dropbox.hitBox(p.x, p.y, Projectiles.FIREBALL_RADIUS) then
+            Projectiles._spawnHitEffect(p.x, p.y, p.type)
+            Sounds.play("fireball_hit")
+            hit = true
         end
+
+        -- Only host (or solo/demo) applies damage; clients just show effects
+        local isAuthority = Network.getRole() ~= Network.ROLE_CLIENT
+
+	    -- Check collision with target player
+	    if not hit then
+	        for _, player in ipairs(players) do
+	            -- Ignore dead players so projectiles don't fizzle on corpses / disconnected slots
+	            if player.id ~= p.owner and (player.life or 0) > 0 then
+	                if Projectiles._hitTest(p, player) then
+	                    -- Only apply damage if we're the authority (host/solo/demo)
+	                    if isAuthority then
+	                        player.life = math.max(0, player.life - Projectiles.DAMAGE)
+	                    end
+	                    player.hitFlash = 0.25   -- flash duration (visual only)
+	                    Projectiles._spawnHitEffect(p.x, p.y, p.type)
+	                    Sounds.play("fireball_hit")
+	                    hit = true
+	                    break
+	                end
+	            end
+	        end
+	    end
 
         -- Remove if hit, or off-screen
         if hit or Projectiles._isOffScreen(p) then

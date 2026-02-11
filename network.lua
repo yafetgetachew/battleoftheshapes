@@ -94,8 +94,9 @@ function Network.startHost(playerCount, isServerMode)
     dedicatedServer = isServerMode or false
     role = Network.ROLE_HOST
     localPlayerId = dedicatedServer and 0 or 1  -- 0 means no local player
-    -- In server mode, all maxPlayers slots are for clients
-    local maxConnections = dedicatedServer and maxPlayers or maxPlayers
+	-- enet.host_create(maxConnections) expects the number of *remote* peers.
+	-- If the host is a player, it is not a peer connection.
+	local maxConnections = dedicatedServer and maxPlayers or (maxPlayers - 1)
     host = enet.host_create("*:" .. Network.PORT, maxConnections, 2)
     if not host then
         return false, "Failed to create server on port " .. Network.PORT
@@ -247,11 +248,20 @@ function Network.getMessages()
 end
 
 function Network.getHostAddress()
-    local socket = require("socket")
+	-- LuaSocket is not bundled with LÖVE by default. Treat it as optional so
+    -- the game/server doesn't crash in packaged builds.
+    local ok, socket = pcall(require, "socket")
+    if not ok or not socket or not socket.udp then
+        return "127.0.0.1"
+    end
     local s = socket.udp()
-    s:setpeername("8.8.8.8", 80)
-    local ip = s:getsockname()
-    s:close()
+    if not s then return "127.0.0.1" end
+
+    -- Best-effort: this may fail if offline/firewalled; still shouldn't crash.
+    pcall(function() s:setpeername("8.8.8.8", 80) end)
+    local ip = nil
+    pcall(function() ip = s:getsockname() end)
+    pcall(function() s:close() end)
     return ip or "127.0.0.1"
 end
 
