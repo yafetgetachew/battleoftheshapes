@@ -76,6 +76,7 @@ local Selection   = require("selection")
 local Projectiles = require("projectiles")
 local Network     = require("network")
 local Lightning   = require("lightning")
+local Dropbox     = require("dropbox")
 local Sounds      = require("sounds")
 
 -- Override port if specified
@@ -186,11 +187,17 @@ function love.update(dt)
         -- Resolve collisions
         Physics.resolveAllCollisions(players, dt)
 
+        -- Consume dash impacts (no particles on server, just clear the list)
+        Physics.consumeDashImpacts()
+
         -- Update projectiles
         Projectiles.update(dt, players)
 
         -- Update lightning (host-authoritative)
         Lightning.update(dt, players)
+
+        -- Update dropboxes (host-authoritative)
+        Dropbox.update(dt, players)
 
         -- Network sync: broadcast all state
         networkSyncTimer = networkSyncTimer + dt
@@ -272,6 +279,13 @@ processNetworkMessages = function()
                 players[data.pid]:castAbilityAtNearest(players)
                 Network.relay(data.pid, "player_cast", data, true)
             end
+
+        elseif msg.type == "player_dash" then
+            local data = msg.data
+            if data and data.pid and players[data.pid] then
+                players[data.pid]:dash(data.dir)
+                Network.relay(data.pid, "player_dash", data, true)
+            end
         end
     end
 end
@@ -310,6 +324,28 @@ sendGameState = function()
         ldata["w" .. i .. "a"] = warning.age
     end
     Network.send("lightning_sync", ldata, false)
+
+    -- Send dropbox state
+    local dropboxState = Dropbox.getState()
+    local ddata = {
+        bc = #dropboxState.boxes,
+        cc = #dropboxState.charges,
+        st = dropboxState.spawnTimer
+    }
+    for i, box in ipairs(dropboxState.boxes) do
+        ddata["b" .. i .. "x"] = box.x
+        ddata["b" .. i .. "y"] = box.y
+        ddata["b" .. i .. "vx"] = box.vx
+        ddata["b" .. i .. "vy"] = box.vy
+        ddata["b" .. i .. "og"] = box.onGround and 1 or 0
+    end
+    for i, charge in ipairs(dropboxState.charges) do
+        ddata["c" .. i .. "x"] = charge.x
+        ddata["c" .. i .. "y"] = charge.y
+        ddata["c" .. i .. "a"] = charge.age
+        ddata["c" .. i .. "k"] = charge.kind or "health"
+    end
+    Network.send("dropbox_sync", ddata, false)
 end
 
 -- ─────────────────────────────────────────────
@@ -321,6 +357,7 @@ startCountdown = function()
         players[i]:setShape(choices[i])
     end
     Projectiles.clear()
+    Dropbox.reset()
 
     -- Spawn positions
     local stageLeft = 250
@@ -382,6 +419,7 @@ restartGame = function()
     restartTimer = nil
     Projectiles.clear()
     Lightning.reset()
+    Dropbox.reset()
     networkSyncTimer = 0
 
     -- Reset players
