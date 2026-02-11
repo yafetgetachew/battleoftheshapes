@@ -38,7 +38,19 @@ love.keyboard = love.keyboard or {}
 love.keyboard.isDown = function() return false end
 
 love.audio = love.audio or {}
-love.audio.newSource = function() return { setVolume = gfxNoop, clone = function(self) return self end, play = gfxNoop } end
+local function makeStubSource()
+    local playing = false
+    local src = {}
+    function src:setVolume(_) end
+    function src:setLooping(_) end
+    function src:play() playing = true end
+    function src:stop() playing = false end
+    function src:pause() playing = false end
+    function src:isPlaying() return playing end
+    function src:clone() return makeStubSource() end
+    return src
+end
+love.audio.newSource = function(...) return makeStubSource() end
 
 love.sound = love.sound or {}
 love.sound.newSoundData = function() return { setSample = gfxNoop } end

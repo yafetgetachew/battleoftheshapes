@@ -30,11 +30,18 @@ Choose your scheme in **Settings**:
 
 **Join**: Select "Join by IP" → enter host's IP → press Enter
 
-**Dedicated Server** (headless):
+**Dedicated Server** (headless, **source-only**):
+
+The shipped builds are for the *video game* part.
+The dedicated server lives in `server/` and is intentionally **not included** in the packaged zips.
+
+Run it from this repo:
 ```bash
 love server/
 love server/ --players 2 --port 27020
 ```
+
+It’ll sit there quietly, waiting for connections… like a very patient polygon bouncer.
 
 ## ⚔️ The Shapes
 
