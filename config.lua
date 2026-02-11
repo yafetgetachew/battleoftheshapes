@@ -11,7 +11,8 @@ local defaultConfig = {
     serverMode = "false",    -- "true" or "false" (dedicated server / relay mode)
     aimAssist = "true",      -- "true" or "false" (auto-aim at nearest enemy)
     demoInvulnerable = "false", -- "true" or "false" (invulnerable in demo mode)
-    musicMuted = "false"     -- "true" or "false" (background music muted)
+    musicMuted = "false",    -- "true" or "false" (background music muted)
+    damageNumbers = "true"   -- "true" or "false" (show floating damage numbers)
 }
 
 -- IP history (stored separately, not in defaultConfig)
@@ -165,6 +166,17 @@ end
 -- Set music muted
 function Config.setMusicMuted(muted)
     currentConfig.musicMuted = muted and "true" or "false"
+    Config.save()
+end
+
+-- Get damage numbers setting
+function Config.getDamageNumbers()
+    return currentConfig.damageNumbers ~= "false"  -- default true
+end
+
+-- Set damage numbers
+function Config.setDamageNumbers(enabled)
+    currentConfig.damageNumbers = enabled and "true" or "false"
     Config.save()
 end
 

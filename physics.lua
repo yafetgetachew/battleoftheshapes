@@ -14,6 +14,9 @@ Physics.WALL_LEFT     = 0
 Physics.WALL_RIGHT    = 1280
 Physics.PUSH_FORCE    = 400       -- push-apart force for overlapping players
 
+-- Callback for juice effects on dash impact (set by main.lua)
+Physics.onDashHit = nil  -- function(x, y, damage, targetPlayer) called on dash collision
+
 -- Apply gravity and integrate velocity for a single player
 function Physics.applyGravity(player, dt)
     player.vy = player.vy + Physics.GRAVITY * dt
@@ -108,6 +111,9 @@ function Physics.resolvePlayerCollision(p1, p2, dt)
         local dasher = p1.isDashing and p1 or p2
         local target = p1.isDashing and p2 or p1
 
+        local dasherPrevLife = dasher.life
+        local targetPrevLife = target.life
+
         -- Apply damage to dasher (unless invulnerable)
         if not dasher.invulnerable then
             local dmg = Player.DASH_SELF_DAMAGE
@@ -147,6 +153,19 @@ function Physics.resolvePlayerCollision(p1, p2, dt)
         local impactY = (dasher.y + target.y) / 2
         table.insert(Physics._dashImpacts, {x = impactX, y = impactY})
         Sounds.play("dash_impact")
+
+        -- Trigger juice callback for damage numbers
+        if Physics.onDashHit then
+            local dasherDmg = dasherPrevLife - dasher.life
+            local targetDmg = targetPrevLife - target.life
+            if dasherDmg > 0 then
+                Physics.onDashHit(dasher.x, dasher.y, dasherDmg)
+            end
+            if targetDmg > 0 then
+                Physics.onDashHit(target.x, target.y, targetDmg)
+            end
+        end
+
         return  -- skip normal collision resolution after dash impact
     end
 

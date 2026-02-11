@@ -88,6 +88,21 @@ function Sounds.load()
     end)
     sfx.lightning:setVolume(0.5)
 
+    -- Lightning warning: rising electric buzz/crackle that builds tension
+    sfx.lightning_warning = generateSound(1.0, sr, function(t, dur)
+        -- Envelope: starts quiet, builds to loud
+        local env = (t / dur) * (t / dur)  -- Quadratic rise
+        -- Electric buzz with rising pitch
+        local baseFreq = 60 + t * 200
+        local buzz = math.sin(2 * math.pi * baseFreq * t) * 0.3
+        -- Crackling noise that intensifies
+        local crackle = (math.random() * 2 - 1) * 0.2 * (t / dur)
+        -- High-pitched whine that rises
+        local whine = math.sin(2 * math.pi * (400 + t * 600) * t) * 0.15 * (t / dur)
+        return (buzz + crackle + whine) * env * 0.8
+    end)
+    sfx.lightning_warning:setVolume(0.35)
+
     -- Dash whoosh: short rising pitch airy whoosh
     sfx.dash_whoosh = generateSound(0.15, sr, function(t, dur)
         local env = (1 - t / dur)
@@ -240,6 +255,13 @@ function Sounds.play(name)
     if not sfx[name] then return end
     -- Clone so multiple can play simultaneously
     local s = sfx[name]:clone()
+    s:play()
+end
+
+-- Play the lightning warning sound (1-second buildup before strike)
+function Sounds.playLightningWarning()
+    if not sfx.lightning_warning then return end
+    local s = sfx.lightning_warning:clone()
     s:play()
 end
 

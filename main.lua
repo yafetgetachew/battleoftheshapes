@@ -25,9 +25,25 @@ local countdownValue
 local splashTimer = 0
 local networkSyncTimer = 0
 
--- Screen shake state
-local screenShakeTimer = 0     -- remaining shake time (seconds)
-local screenShakeIntensity = 0 -- current shake magnitude (pixels)
+-- Screen shake state (improved: frequency-based with falloff curve)
+local screenShakeTimer = 0       -- remaining shake time (seconds)
+local screenShakeIntensity = 0   -- current shake magnitude (pixels)
+local screenShakeFrequency = 30  -- shake oscillation frequency (Hz)
+local screenShakePhase = 0       -- current phase for smooth shake
+local screenShakeDuration = 0    -- total duration (for falloff curve)
+
+-- Camera state (dynamic framing + micro-zoom)
+local cameraX, cameraY = 0, 0            -- current camera offset (world coords)
+local cameraTargetX, cameraTargetY = 0, 0 -- target camera position
+local cameraZoom = 1.0                    -- current zoom level
+local cameraTargetZoom = 1.0              -- target zoom level
+local cameraZoomTimer = 0                 -- remaining micro-zoom time
+
+-- Hit pause state
+local hitPauseTimer = 0  -- remaining freeze time (seconds)
+
+-- Damage numbers
+local damageNumbers = {}  -- {x, y, value, age, vx, vy}
 
 -- Low health heartbeat state
 local heartbeatTimer = 0       -- time until next heartbeat sound
@@ -69,6 +85,149 @@ local function getFont(size)
 end
 
 -- ─────────────────────────────────────────────
+-- Juice helpers: screen shake, hit pause, damage numbers, camera
+-- ─────────────────────────────────────────────
+
+-- Trigger screen shake with frequency-based oscillation and falloff
+local function addScreenShake(intensity, duration, frequency)
+    screenShakeTimer = duration
+    screenShakeDuration = duration
+    screenShakeIntensity = intensity
+    screenShakeFrequency = frequency or 30
+    -- Randomize phase so consecutive shakes don't look identical
+    screenShakePhase = math.random() * math.pi * 2
+end
+
+-- Trigger hit pause (freezes game for a brief moment)
+local function addHitPause(duration)
+    hitPauseTimer = math.max(hitPauseTimer, duration)
+end
+
+-- Trigger camera micro-zoom (punch in then ease back)
+local function addCameraZoom(targetZoom, duration)
+    cameraTargetZoom = targetZoom
+    cameraZoomTimer = duration
+end
+
+-- Spawn a damage number at position
+local function spawnDamageNumber(x, y, value)
+    if not Config.getDamageNumbers() then return end
+    table.insert(damageNumbers, {
+        x = x,
+        y = y - 20,  -- Start slightly above hit point
+        value = math.floor(value + 0.5),
+        age = 0,
+        maxAge = 0.8,
+        vx = (math.random() - 0.5) * 30,
+        vy = -80  -- Float upward
+    })
+end
+
+-- Update camera to follow players with lead
+local function updateCamera(dt, alivePlayers)
+    -- Calculate center of alive players
+    local sumX, sumY, sumVX = 0, 0, 0
+    local count = 0
+    for _, p in ipairs(alivePlayers) do
+        if p.life > 0 then
+            sumX = sumX + p.x
+            sumY = sumY + p.y
+            sumVX = sumVX + (p.vx or 0)
+            count = count + 1
+        end
+    end
+
+    if count > 0 then
+        local centerX = sumX / count
+        local centerY = sumY / count
+        local avgVX = sumVX / count
+
+        -- Add slight lead in movement direction
+        local leadAmount = 30
+        centerX = centerX + (avgVX / 300) * leadAmount
+
+        -- Calculate offset from default center (GAME_WIDTH/2, vertical stays fixed)
+        cameraTargetX = (centerX - GAME_WIDTH / 2) * 0.3
+        cameraTargetY = math.max(-30, math.min(30, (centerY - 400) * 0.1))
+    else
+        cameraTargetX = 0
+        cameraTargetY = 0
+    end
+
+    -- Smooth interpolation toward target
+    local smoothing = 5 * dt
+    cameraX = cameraX + (cameraTargetX - cameraX) * smoothing
+    cameraY = cameraY + (cameraTargetY - cameraY) * smoothing
+
+    -- Update zoom
+    if cameraZoomTimer > 0 then
+        cameraZoomTimer = cameraZoomTimer - dt
+        if cameraZoomTimer <= 0 then
+            cameraTargetZoom = 1.0
+            cameraZoomTimer = 0
+        end
+    end
+    -- Smooth zoom interpolation
+    local zoomSmoothing = 8 * dt
+    cameraZoom = cameraZoom + (cameraTargetZoom - cameraZoom) * zoomSmoothing
+end
+
+-- Calculate current screen shake offset (frequency-based with falloff)
+local function getScreenShakeOffset()
+    if screenShakeTimer <= 0 then
+        return 0, 0
+    end
+    -- Falloff curve: starts at 1.0, decays to 0
+    local progress = screenShakeTimer / screenShakeDuration
+    local falloff = progress * progress  -- Quadratic falloff (fast decay at end)
+
+    -- Frequency-based oscillation (smooth sine wave, not random jitter)
+    local time = love.timer.getTime()
+    local shakeX = math.sin(time * screenShakeFrequency + screenShakePhase) * screenShakeIntensity * falloff
+    local shakeY = math.cos(time * screenShakeFrequency * 1.1 + screenShakePhase) * screenShakeIntensity * falloff * 0.7
+
+    return shakeX, shakeY
+end
+
+-- Update damage numbers
+local function updateDamageNumbers(dt)
+    for i = #damageNumbers, 1, -1 do
+        local dn = damageNumbers[i]
+        dn.age = dn.age + dt
+        dn.x = dn.x + dn.vx * dt
+        dn.y = dn.y + dn.vy * dt
+        dn.vy = dn.vy + 50 * dt  -- Slight gravity to arc upward then slow
+        if dn.age >= dn.maxAge then
+            table.remove(damageNumbers, i)
+        end
+    end
+end
+
+-- Draw damage numbers (call in world space)
+local function drawDamageNumbers()
+    for _, dn in ipairs(damageNumbers) do
+        local progress = dn.age / dn.maxAge
+        local alpha = 1 - progress * progress  -- Fade out
+        local scale = 1 + progress * 0.3       -- Slight grow
+
+        -- Color based on damage amount
+        local r, g, b = 1, 0.9, 0.3  -- Yellow-orange default
+        if dn.value >= 20 then
+            r, g, b = 1, 0.3, 0.2  -- Red for big hits
+        elseif dn.value >= 15 then
+            r, g, b = 1, 0.5, 0.2  -- Orange for medium
+        end
+
+        love.graphics.setColor(0, 0, 0, alpha * 0.5)
+        love.graphics.setFont(getFont(math.floor(18 * scale)))
+        love.graphics.printf(tostring(dn.value), dn.x - 50 + 1, dn.y + 1, 100, "center")
+
+        love.graphics.setColor(r, g, b, alpha)
+        love.graphics.printf(tostring(dn.value), dn.x - 50, dn.y, 100, "center")
+    end
+end
+
+-- ─────────────────────────────────────────────
 -- love.load
 -- ─────────────────────────────────────────────
 function love.load()
@@ -88,6 +247,30 @@ function love.load()
     Sounds.load()
     -- Apply saved music mute setting
     Sounds.setMusicMuted(Config.getMusicMuted())
+
+    -- Set up projectile hit callbacks for juice effects
+    Projectiles.onHit = function(x, y, damage)
+        spawnDamageNumber(x, y, damage)
+        addHitPause(0.04)  -- 40ms hit pause on regular hits
+        addScreenShake(3, 0.1, 45)
+    end
+    Projectiles.onKill = function(x, y)
+        addHitPause(0.06)  -- Extra 60ms on kill (stacks with death explosion)
+    end
+
+    -- Set up lightning hit callbacks for juice effects
+    Lightning.onHit = function(x, y, damage)
+        spawnDamageNumber(x, y, damage)
+        addHitPause(0.05)  -- 50ms hit pause on lightning hit
+    end
+    Lightning.onWarningStart = function(x)
+        Sounds.playLightningWarning()  -- Start warning sound ramp
+    end
+
+    -- Set up dash collision callbacks for juice effects
+    Physics.onDashHit = function(x, y, damage)
+        spawnDamageNumber(x, y, damage)
+    end
 
     gameState = "splash"
     splashTimer = 0
@@ -120,8 +303,15 @@ function love.update(dt)
     -- Cap delta to avoid physics tunneling on lag spikes
     dt = math.min(dt, 1/30)
 
-    -- Update parallax background (clouds drift)
-    Background.update(dt)
+    -- Hit pause: freeze game briefly on big impacts (but keep updating camera/shake)
+    local realDt = dt
+    if hitPauseTimer > 0 then
+        hitPauseTimer = hitPauseTimer - realDt
+        dt = 0  -- Freeze game simulation
+    end
+
+    -- Update parallax background (clouds drift) - use realDt so clouds keep moving during hit pause
+    Background.update(realDt)
 
     if gameState == "splash" then
         splashTimer = splashTimer + dt
@@ -176,6 +366,7 @@ function love.update(dt)
             Lightning.reset()
             Dropbox.reset()
             Sounds.startMusic()  -- Start background music when gameplay begins
+            Background.onMatchStart()  -- Moon glow pulse
         end
 
     elseif gameState == "playing" then
@@ -204,8 +395,9 @@ function love.update(dt)
             -- Spawn dash impact particles
             for _, impact in ipairs(Physics.consumeDashImpacts()) do
                 Projectiles.spawnDashImpact(impact.x, impact.y)
-                screenShakeTimer = 0.15
-                screenShakeIntensity = 4
+                addScreenShake(6, 0.15, 40)
+                addHitPause(0.05)  -- 50ms hit pause on dash impact
+                addCameraZoom(1.02, 0.15)
             end
 
             -- Update projectiles
@@ -218,8 +410,8 @@ function love.update(dt)
 
             -- Screen shake on lightning strike (works for host, client, and solo)
             if Lightning.consumeStrike() then
-                screenShakeTimer = 0.3
-                screenShakeIntensity = 6
+                addScreenShake(8, 0.3, 25)
+                Background.onLightningStrike()  -- Brighten clouds
             end
 
             -- Update dropboxes
@@ -231,8 +423,9 @@ function love.update(dt)
                 if p:consumeDeath() then
                     Sounds.play("death")
                     Projectiles.spawnDeathExplosion(p.x, p.y, p.shapeKey)
-                    screenShakeTimer = 0.4
-                    screenShakeIntensity = 8
+                    addScreenShake(12, 0.5, 20)
+                    addHitPause(0.08)  -- 80ms hit pause on death
+                    addCameraZoom(1.05, 0.25)
                 end
             end
 
@@ -261,14 +454,22 @@ function love.update(dt)
         end
     end
 
-    -- Decay screen shake
+    -- Decay screen shake (use realDt so shake continues during hit pause)
     if screenShakeTimer > 0 then
-        screenShakeTimer = screenShakeTimer - dt
+        screenShakeTimer = screenShakeTimer - realDt
         if screenShakeTimer <= 0 then
             screenShakeTimer = 0
             screenShakeIntensity = 0
         end
     end
+
+    -- Update camera (use realDt so camera keeps moving during hit pause)
+    if gameState == "playing" or gameState == "gameover" then
+        updateCamera(realDt, players)
+    end
+
+    -- Update damage numbers (use realDt so they keep floating during hit pause)
+    updateDamageNumbers(realDt)
 
     -- Low health heartbeat (only during gameplay for local player)
     if gameState == "playing" then
@@ -299,8 +500,10 @@ end
 function love.draw()
     -- Apply scaling and offset for proper aspect ratio
     love.graphics.push()
-    local shakeX = screenShakeTimer > 0 and (math.random() - 0.5) * screenShakeIntensity * 2 or 0
-    local shakeY = screenShakeTimer > 0 and (math.random() - 0.5) * screenShakeIntensity * 2 or 0
+
+    -- Get frequency-based screen shake offset
+    local shakeX, shakeY = getScreenShakeOffset()
+
     love.graphics.translate(offsetX + shakeX, offsetY + shakeY)
     love.graphics.scale(scaleX, scaleY)
 
@@ -330,6 +533,13 @@ function love.draw()
         -- ── Ground ──
         drawGround(W, H)
 
+        -- Apply camera transform for game world elements
+        love.graphics.push()
+        -- Zoom from center of screen
+        love.graphics.translate(W/2, H/2)
+        love.graphics.scale(cameraZoom, cameraZoom)
+        love.graphics.translate(-W/2 - cameraX, -H/2 - cameraY)
+
         -- ── Player shadows ──
         for _, p in ipairs(players) do p:drawShadow() end
 
@@ -343,10 +553,20 @@ function love.draw()
         -- ── Dropboxes ──
         Dropbox.draw()
 
-        -- ── Lightning ──
+        -- ── Lightning (world elements only) ──
         Lightning.draw(W, H)
 
-        -- ── HUD ──
+        -- ── Damage numbers ──
+        drawDamageNumbers()
+
+        -- End camera transform
+        love.graphics.pop()
+
+        -- ── Foreground silhouettes (parallax depth cues) ──
+        local parallaxOffset = Background.getParallaxOffset(players, W)
+        Background.drawForeground(W, H, parallaxOffset)
+
+        -- ── HUD (not affected by camera) ──
         HUD.draw(players, W)
 
         -- ── Countdown overlay ──
@@ -1625,8 +1845,9 @@ function updateDemoMode(dt)
     -- Spawn dash impact particles
     for _, impact in ipairs(Physics.consumeDashImpacts()) do
         Projectiles.spawnDashImpact(impact.x, impact.y)
-        screenShakeTimer = 0.15
-        screenShakeIntensity = 4
+        addScreenShake(6, 0.15, 40)
+        addHitPause(0.05)
+        addCameraZoom(1.02, 0.15)
     end
 
     -- Update projectiles
@@ -1637,8 +1858,8 @@ function updateDemoMode(dt)
 
     -- Screen shake on lightning strike
     if Lightning.consumeStrike() then
-        screenShakeTimer = 0.3
-        screenShakeIntensity = 6
+        addScreenShake(8, 0.3, 25)
+        Background.onLightningStrike()  -- Brighten clouds
     end
 
     -- Update dropboxes
@@ -1650,8 +1871,9 @@ function updateDemoMode(dt)
         if p:consumeDeath() then
             Sounds.play("death")
             Projectiles.spawnDeathExplosion(p.x, p.y, p.shapeKey)
-            screenShakeTimer = 0.4
-            screenShakeIntensity = 8
+            addScreenShake(12, 0.5, 20)
+            addHitPause(0.08)
+            addCameraZoom(1.05, 0.25)
         end
     end
 

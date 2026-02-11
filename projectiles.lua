@@ -14,6 +14,10 @@ Projectiles.WILL_COST      = 10
 Projectiles.FIREBALL_SPEED = 600     -- px/s horizontal
 Projectiles.FIREBALL_RADIUS = 12
 
+-- Callbacks for juice effects (set by main.lua)
+Projectiles.onHit = nil         -- function(x, y, damage) called when fireball hits
+Projectiles.onKill = nil        -- function(x, y) called when a hit results in death
+
 -- Active projectile list and hit-effect list
 local active = {}
 local effects = {}
@@ -115,9 +119,12 @@ function Projectiles.update(dt, players)
 	            -- Ignore dead players so projectiles don't fizzle on corpses / disconnected slots
 	            if player.id ~= p.owner and (player.life or 0) > 0 then
 	                if Projectiles._hitTest(p, player) then
+	                    local prevLife = player.life
+	                    local actualDmg = 0
 	                    -- Only apply damage if we're the authority (host/solo/demo)
 	                    if isAuthority and not player.invulnerable then
 	                        local dmg = p.damage or Projectiles.DAMAGE
+	                        actualDmg = dmg
 	                        -- Armor absorbs damage first, then vanishes
 	                        if player.armor and player.armor > 0 then
 	                            local absorbed = math.min(player.armor, dmg)
@@ -126,10 +133,20 @@ function Projectiles.update(dt, players)
 	                            if player.armor <= 0 then player.armor = 0 end
 	                        end
 	                        player.life = math.max(0, player.life - dmg)
+	                        actualDmg = prevLife - player.life
 	                    end
 	                    player.hitFlash = 0.25   -- flash duration (visual only)
 	                    Projectiles._spawnHitEffect(p.x, p.y, p.type)
 	                    Sounds.play("fireball_hit")
+
+	                    -- Trigger juice callbacks
+	                    if Projectiles.onHit and actualDmg > 0 then
+	                        Projectiles.onHit(player.x, player.y, actualDmg)
+	                    end
+	                    if Projectiles.onKill and prevLife > 0 and player.life <= 0 then
+	                        Projectiles.onKill(player.x, player.y)
+	                    end
+
 	                    hit = true
 	                    break
 	                end
