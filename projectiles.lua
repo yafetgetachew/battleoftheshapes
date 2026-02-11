@@ -5,6 +5,7 @@
 local Physics = require("physics")
 local Sounds  = require("sounds")
 local Dropbox = require("dropbox")
+local Network = require("network")
 
 local Projectiles = {}
 
@@ -65,14 +66,20 @@ function Projectiles.update(dt, players)
             hit = true
         end
 
+        -- Only host (or solo/demo) applies damage; clients just show effects
+        local isAuthority = Network.getRole() ~= Network.ROLE_CLIENT
+
 	    -- Check collision with target player
 	    if not hit then
 	        for _, player in ipairs(players) do
 	            -- Ignore dead players so projectiles don't fizzle on corpses / disconnected slots
 	            if player.id ~= p.owner and (player.life or 0) > 0 then
 	                if Projectiles._hitTest(p, player) then
-	                    player.life = math.max(0, player.life - Projectiles.DAMAGE)
-	                    player.hitFlash = 0.25   -- flash duration
+	                    -- Only apply damage if we're the authority (host/solo/demo)
+	                    if isAuthority then
+	                        player.life = math.max(0, player.life - Projectiles.DAMAGE)
+	                    end
+	                    player.hitFlash = 0.25   -- flash duration (visual only)
 	                    Projectiles._spawnHitEffect(p.x, p.y, p.type)
 	                    Sounds.play("fireball_hit")
 	                    hit = true

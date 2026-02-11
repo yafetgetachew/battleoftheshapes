@@ -3,6 +3,7 @@
 
 local Physics = require("physics")
 local Sounds  = require("sounds")
+local Network = require("network")
 
 local Dropbox = {}
 
@@ -89,6 +90,8 @@ function Dropbox.update(dt, players)
     end
 
     -- Update life charges
+    -- Only host (or solo/demo) applies healing; clients receive authoritative life from host
+    local isAuthority = Network.getRole() ~= Network.ROLE_CLIENT
     for i = #charges, 1, -1 do
         local charge = charges[i]
         charge.age = charge.age + dt
@@ -96,9 +99,11 @@ function Dropbox.update(dt, players)
         -- Check player pickup
         for _, player in ipairs(players) do
             if player.life > 0 and Dropbox._playerTouchesCharge(player, charge) then
-                -- Heal player
-                player.life = math.min(player.maxLife, player.life + Dropbox.LIFE_HEAL)
-                player.hitFlash = 0.15  -- brief flash for feedback
+                -- Heal player (only if authority)
+                if isAuthority then
+                    player.life = math.min(player.maxLife, player.life + Dropbox.LIFE_HEAL)
+                end
+                player.hitFlash = 0.15  -- brief flash for feedback (visual only)
                 Sounds.play("fireball_cast")  -- reuse sound for pickup
                 table.remove(charges, i)
                 break

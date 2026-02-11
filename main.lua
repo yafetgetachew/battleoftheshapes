@@ -975,7 +975,7 @@ function processNetworkMessages()
 
         elseif msg.type == "game_over" then
             local data = msg.data
-            if data and data.winner then
+            if data and data.winner ~= nil then
                 winner = data.winner
                 gameState = "gameover"
             end
@@ -1101,9 +1101,15 @@ function applyGameState(data)
 end
 
 -- ─────────────────────────────────────────────
--- Game over check
+-- Game over check (host-authoritative)
 -- ─────────────────────────────────────────────
 function checkGameOver()
+    -- Only host (or solo/demo mode) determines game over
+    -- Clients receive game_over message from host
+    if Network.getRole() == Network.ROLE_CLIENT then
+        return  -- clients don't check, they wait for host message
+    end
+
     local alive = {}
     for _, p in ipairs(players) do
         if p.life > 0 then
