@@ -4,6 +4,7 @@
 local Shapes      = require("shapes")
 local Physics     = require("physics")
 local Projectiles = require("projectiles")
+local Config      = require("config")
 
 local Player = {}
 Player.__index = Player
@@ -97,25 +98,33 @@ function Player:castAbility(target)
 end
 
 -- Cast fireball at nearest alive enemy from a list of all players
+-- If aim assist is OFF, shoots in the direction the player is facing
 function Player:castAbilityAtNearest(allPlayers)
     if self.will < Projectiles.WILL_COST then return false end
     if not Player.ABILITY_MAP[self.shapeKey] then return false end
 
-    local nearest = nil
-    local nearestDist = math.huge
-    for _, other in ipairs(allPlayers) do
-        if other.id ~= self.id and other.life and other.life > 0 then
-            local dist = math.abs(other.x - self.x)
-            if dist < nearestDist then
-                nearestDist = dist
-                nearest = other
+    -- Check aim assist setting
+    if Config.getAimAssist() then
+        -- Aim assist ON: target nearest enemy
+        local nearest = nil
+        local nearestDist = math.huge
+        for _, other in ipairs(allPlayers) do
+            if other.id ~= self.id and other.life and other.life > 0 then
+                local dist = math.abs(other.x - self.x)
+                if dist < nearestDist then
+                    nearestDist = dist
+                    nearest = other
+                end
             end
         end
+        if nearest then
+            return Projectiles.spawnFireball(self, nearest)
+        end
+        return false
+    else
+        -- Aim assist OFF: shoot in facing direction
+        return Projectiles.spawnFireballDirectional(self, self.facingRight)
     end
-    if nearest then
-        return Projectiles.spawnFireball(self, nearest)
-    end
-    return false
 end
 
 function Player:update(dt)

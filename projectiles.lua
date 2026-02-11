@@ -44,6 +44,28 @@ function Projectiles.spawnFireball(caster, target)
     return true
 end
 
+-- Spawn a fireball in a specific direction (for aim assist OFF)
+function Projectiles.spawnFireballDirectional(caster, facingRight)
+    if caster.will < Projectiles.WILL_COST then return false end
+    caster.will = caster.will - Projectiles.WILL_COST
+    local dir = facingRight and 1 or -1
+    local proj = {
+        type     = "fireball",
+        owner    = caster.id,
+        targetId = nil,  -- no specific target
+        x        = caster.x + dir * (caster.shapeWidth / 2 + 10),
+        y        = caster.y,
+        vx       = Projectiles.FIREBALL_SPEED * dir,
+        vy       = 0,
+        radius   = Projectiles.FIREBALL_RADIUS,
+        age      = 0,
+        particles = {}
+    }
+    table.insert(active, proj)
+    Sounds.play("fireball_cast")
+    return true
+end
+
 -- ─────────────────────────────────────────────
 -- Update
 -- ─────────────────────────────────────────────

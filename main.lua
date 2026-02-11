@@ -32,8 +32,9 @@ local bots = {}            -- bot AI state for each bot player
 local menuChoice = 1       -- 1 = Host, 2 = Join, 3 = Demo, 4 = Settings
 local joinAddress = ""
 local menuStatus = ""
-local settingsRow = 1      -- 1 = Control Scheme, 2 = Player Count, 3 = Server Mode
+local settingsRow = 1      -- 1 = Control Scheme, 2 = Player Count, 3 = Server Mode, 4 = Aim Assist
 local serverMode = false   -- true = dedicated server (host is relay only)
+local ipHistoryIndex = 0   -- 0 = typing new IP, 1+ = selecting from history
 
 -- Game over
 local winner = nil
@@ -600,7 +601,7 @@ end
 -- Settings Screen
 -- ─────────────────────────────────────────────
 function handleSettingsKey(key)
-    local maxRows = 3
+    local maxRows = 4
     if key == "up" or key == "w" then
         settingsRow = settingsRow - 1
         if settingsRow < 1 then settingsRow = maxRows end
@@ -627,6 +628,9 @@ function handleSettingsKey(key)
         elseif settingsRow == 3 then
             -- Toggle server mode
             Config.setServerMode(not Config.getServerMode())
+        elseif settingsRow == 4 then
+            -- Toggle aim assist
+            Config.setAimAssist(not Config.getAimAssist())
         end
     elseif key == "backspace" then
         gameState = "menu"
@@ -709,7 +713,7 @@ function drawSettings(W, H)
     end
 
     -- Row 3: Server Mode
-    local row3Y = 440
+    local row3Y = 390
     love.graphics.setFont(labelFont)
     if settingsRow == 3 then
         love.graphics.setColor(1.0, 1.0, 0.4)
@@ -726,22 +730,58 @@ function drawSettings(W, H)
         else
             love.graphics.setColor(0.3, 0.7, 0.3)
         end
-        love.graphics.printf("< ON >", 0, row3Y + 35, W, "center")
+        love.graphics.printf("< ON >", 0, row3Y + 30, W, "center")
     else
         if settingsRow == 3 then
             love.graphics.setColor(1.0, 0.5, 0.4)
         else
             love.graphics.setColor(0.7, 0.4, 0.3)
         end
-        love.graphics.printf("< OFF >", 0, row3Y + 35, W, "center")
+        love.graphics.printf("< OFF >", 0, row3Y + 30, W, "center")
     end
 
     love.graphics.setFont(detailFont)
     love.graphics.setColor(0.5, 0.5, 0.5)
     if sm then
-        love.graphics.printf("Host is relay only — does not play", 0, row3Y + 72, W, "center")
+        love.graphics.printf("Host is relay only — does not play", 0, row3Y + 60, W, "center")
     else
-        love.graphics.printf("Host joins the game as a player", 0, row3Y + 72, W, "center")
+        love.graphics.printf("Host joins the game as a player", 0, row3Y + 60, W, "center")
+    end
+
+    -- Row 4: Aim Assist
+    local row4Y = 500
+    love.graphics.setFont(labelFont)
+    if settingsRow == 4 then
+        love.graphics.setColor(1.0, 1.0, 0.4)
+    else
+        love.graphics.setColor(0.6, 0.6, 0.6)
+    end
+    love.graphics.printf("Aim Assist:", 0, row4Y, W, "center")
+
+    love.graphics.setFont(valueFont)
+    local aa = Config.getAimAssist()
+    if aa then
+        if settingsRow == 4 then
+            love.graphics.setColor(0.4, 1.0, 0.4)
+        else
+            love.graphics.setColor(0.3, 0.7, 0.3)
+        end
+        love.graphics.printf("< ON >", 0, row4Y + 30, W, "center")
+    else
+        if settingsRow == 4 then
+            love.graphics.setColor(1.0, 0.5, 0.4)
+        else
+            love.graphics.setColor(0.7, 0.4, 0.3)
+        end
+        love.graphics.printf("< OFF >", 0, row4Y + 30, W, "center")
+    end
+
+    love.graphics.setFont(detailFont)
+    love.graphics.setColor(0.5, 0.5, 0.5)
+    if aa then
+        love.graphics.printf("Fireballs auto-target nearest enemy", 0, row4Y + 60, W, "center")
+    else
+        love.graphics.printf("Fireballs shoot in facing direction", 0, row4Y + 60, W, "center")
     end
 
 	love.graphics.setFont(getFont(14))
@@ -753,19 +793,56 @@ function drawConnecting(W, H)
     love.graphics.setColor(0.06, 0.06, 0.1)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
-	love.graphics.setFont(getFont(20))
+    love.graphics.setFont(getFont(20))
     love.graphics.setColor(1, 1, 1)
-    love.graphics.printf(menuStatus, 0, H / 2 - 60, W, "center")
+    love.graphics.printf(menuStatus, 0, 80, W, "center")
 
-	love.graphics.setFont(getFont(28))
-    love.graphics.setColor(1.0, 1.0, 0.4)
+    -- IP input area
+    local inputY = 140
+    love.graphics.setFont(getFont(16))
+    love.graphics.setColor(0.6, 0.6, 0.6)
+    love.graphics.printf("Enter IP address:", 0, inputY, W, "center")
+
+    love.graphics.setFont(getFont(28))
+    if ipHistoryIndex == 0 then
+        love.graphics.setColor(1.0, 1.0, 0.4)
+    else
+        love.graphics.setColor(0.5, 0.5, 0.5)
+    end
     local display = joinAddress
     if #display == 0 then display = "_" end
-    love.graphics.printf(display, 0, H / 2, W, "center")
+    love.graphics.printf(display, 0, inputY + 30, W, "center")
 
-	love.graphics.setFont(getFont(14))
+    -- IP History
+    local history = Config.getIPHistory()
+    if #history > 0 then
+        local historyY = inputY + 90
+        love.graphics.setFont(getFont(16))
+        love.graphics.setColor(0.6, 0.6, 0.6)
+        love.graphics.printf("Recent connections (↑/↓ to select):", 0, historyY, W, "center")
+
+        love.graphics.setFont(getFont(22))
+        local maxDisplay = math.min(#history, 5)  -- Show max 5 entries
+        for i = 1, maxDisplay do
+            local y = historyY + 30 + (i - 1) * 35
+            if i == ipHistoryIndex then
+                love.graphics.setColor(1.0, 1.0, 0.4)
+                love.graphics.printf("> " .. history[i] .. " <", 0, y, W, "center")
+            else
+                love.graphics.setColor(0.7, 0.7, 0.7)
+                love.graphics.printf(history[i], 0, y, W, "center")
+            end
+        end
+        if #history > maxDisplay then
+            love.graphics.setFont(getFont(14))
+            love.graphics.setColor(0.5, 0.5, 0.5)
+            love.graphics.printf("... and " .. (#history - maxDisplay) .. " more", 0, historyY + 30 + maxDisplay * 35, W, "center")
+        end
+    end
+
+    love.graphics.setFont(getFont(14))
     love.graphics.setColor(0.5, 0.5, 0.5)
-    love.graphics.printf("Backspace to go back to menu", 0, H - 40, W, "center")
+    love.graphics.printf("Enter to connect  •  Backspace to go back", 0, H - 40, W, "center")
 end
 
 
@@ -824,17 +901,59 @@ function love.textinput(text)
     end
 end
 
--- Override keypressed for connecting state - handle Enter/Backspace
+-- Override keypressed for connecting state - handle Enter/Backspace/arrows
 function handleConnectingKey(key)
-    if key == "return" and #joinAddress > 0 then
-        startAsClient(joinAddress)
+    local history = Config.getIPHistory()
+    local historyCount = #history
+
+    if key == "return" then
+        local addressToUse = ""
+        if ipHistoryIndex > 0 and ipHistoryIndex <= historyCount then
+            -- Use selected history IP
+            addressToUse = history[ipHistoryIndex]
+        else
+            -- Use typed address
+            addressToUse = joinAddress
+        end
+        if #addressToUse > 0 then
+            -- Store the address we're connecting to (for saving to history on success)
+            joinAddress = addressToUse
+            startAsClient(addressToUse)
+        end
+    elseif key == "up" then
+        -- Navigate up in history (or wrap to bottom)
+        if historyCount > 0 then
+            if ipHistoryIndex == 0 then
+                ipHistoryIndex = historyCount
+            else
+                ipHistoryIndex = ipHistoryIndex - 1
+            end
+        end
+    elseif key == "down" then
+        -- Navigate down in history (or wrap to typing mode)
+        if historyCount > 0 then
+            if ipHistoryIndex >= historyCount then
+                ipHistoryIndex = 0
+            else
+                ipHistoryIndex = ipHistoryIndex + 1
+            end
+        end
     elseif key == "backspace" then
-        if #joinAddress > 0 then
+        if ipHistoryIndex > 0 then
+            -- Exit history selection, go back to typing
+            ipHistoryIndex = 0
+        elseif #joinAddress > 0 then
             joinAddress = joinAddress:sub(1, -2)
         else
             Network.stop()
             gameState = "menu"
             menuStatus = ""
+            ipHistoryIndex = 0
+        end
+    else
+        -- If typing, reset history selection
+        if ipHistoryIndex > 0 and key:match("^[%w%.:]$") then
+            ipHistoryIndex = 0
         end
     end
 end
@@ -866,6 +985,11 @@ function processNetworkMessages()
             -- Set local player
             players[pid].isRemote = false
             players[pid].controls = Config.getControls()
+
+            -- Save IP to history on successful connection
+            if #joinAddress > 0 then
+                Config.addIPToHistory(joinAddress)
+            end
 
             selection = Selection.new(pid, maxPlayers)
             gameState = "selection"
