@@ -71,6 +71,15 @@ end
 
 Physics.COLLISION_DAMAGE = 2   -- damage dealt to the lower player on collision
 
+-- Track dash impact particles and flag
+Physics._dashImpacts = {}  -- list of {x, y} positions where dash impacts occurred
+
+function Physics.consumeDashImpacts()
+    local impacts = Physics._dashImpacts
+    Physics._dashImpacts = {}
+    return impacts
+end
+
 -- Resolve player-vs-player collision by pushing them apart
 -- Also applies collision damage: the lower player (higher Y) takes damage
 function Physics.resolvePlayerCollision(p1, p2, dt)
@@ -90,16 +99,76 @@ function Physics.resolvePlayerCollision(p1, p2, dt)
 
     if overlapX <= 0 or overlapY <= 0 then return end
 
-    -- Apply collision damage to the lower player (higher Y = lower on screen)
     -- Only host (or solo/demo) applies damage; clients receive authoritative life from host
     local isAuthority = Network.getRole() ~= Network.ROLE_CLIENT
+    local Player = require("player")
+
+    -- ── Dash collision ──
+    if isAuthority and (p1.isDashing or p2.isDashing) then
+        local dasher = p1.isDashing and p1 or p2
+        local target = p1.isDashing and p2 or p1
+
+        -- Apply damage to dasher (unless invulnerable)
+        if not dasher.invulnerable then
+            local dmg = Player.DASH_SELF_DAMAGE
+            if dasher.armor and dasher.armor > 0 then
+                local absorbed = math.min(dasher.armor, dmg)
+                dmg = dmg - absorbed
+                dasher.armor = dasher.armor - absorbed
+                if dasher.armor <= 0 then dasher.armor = 0 end
+            end
+            dasher.life = math.max(0, dasher.life - dmg)
+            dasher.hitFlash = 0.25
+        end
+
+        -- Apply damage to target (unless invulnerable)
+        if not target.invulnerable then
+            local dmg = Player.DASH_TARGET_DAMAGE
+            if target.armor and target.armor > 0 then
+                local absorbed = math.min(target.armor, dmg)
+                dmg = dmg - absorbed
+                target.armor = target.armor - absorbed
+                if target.armor <= 0 then target.armor = 0 end
+            end
+            target.life = math.max(0, target.life - dmg)
+            target.hitFlash = 0.25
+        end
+
+        -- Knockback the target
+        target.vx = Player.DASH_KNOCKBACK * dasher.dashDir
+
+        -- End the dash
+        dasher.isDashing = false
+        dasher.dashTimer = 0
+        dasher.vx = dasher.speed * dasher.dashDir * 0.2
+
+        -- Record impact for particle effects and sound
+        local impactX = (dasher.x + target.x) / 2
+        local impactY = (dasher.y + target.y) / 2
+        table.insert(Physics._dashImpacts, {x = impactX, y = impactY})
+        Sounds.play("dash_impact")
+        return  -- skip normal collision resolution after dash impact
+    end
+
+    -- Apply collision damage to the lower player (higher Y = lower on screen)
     local lowerPlayer = (p1.y > p2.y) and p1 or p2
     if isAuthority and lowerPlayer.life and lowerPlayer.life > 0 then
-        local prevLife = lowerPlayer.life
-        lowerPlayer.life = math.max(0, lowerPlayer.life - Physics.COLLISION_DAMAGE * dt)
-        -- Play hurt sound on significant damage ticks (not every frame)
-        if math.floor(prevLife) ~= math.floor(lowerPlayer.life) then
-            Sounds.play("player_hurt")
+        -- Skip if invulnerable
+        if not lowerPlayer.invulnerable then
+            local dmg = Physics.COLLISION_DAMAGE * dt
+            -- Armor absorbs collision damage
+            if lowerPlayer.armor and lowerPlayer.armor > 0 then
+                local absorbed = math.min(lowerPlayer.armor, dmg)
+                dmg = dmg - absorbed
+                lowerPlayer.armor = lowerPlayer.armor - absorbed
+                if lowerPlayer.armor <= 0 then lowerPlayer.armor = 0 end
+            end
+            local prevLife = lowerPlayer.life
+            lowerPlayer.life = math.max(0, lowerPlayer.life - dmg)
+            -- Play hurt sound on significant damage ticks (not every frame)
+            if math.floor(prevLife) ~= math.floor(lowerPlayer.life) then
+                Sounds.play("player_hurt")
+            end
         end
     end
 

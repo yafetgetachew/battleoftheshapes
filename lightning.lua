@@ -16,11 +16,21 @@ Lightning.WARNING_DURATION = 1.0   -- how long the warning indicator shows
 local strikes = {}       -- active lightning visual effects
 local nextStrikeTimer = 5 -- countdown to next strike
 local warnings = {}       -- active warning indicators
+local strikeOccurred = false  -- flag: a strike happened this frame
 
 function Lightning.reset()
     strikes = {}
     warnings = {}
     nextStrikeTimer = Lightning.MIN_INTERVAL + math.random() * (Lightning.MAX_INTERVAL - Lightning.MIN_INTERVAL)
+end
+
+-- Returns true once per strike, then resets
+function Lightning.consumeStrike()
+    if strikeOccurred then
+        strikeOccurred = false
+        return true
+    end
+    return false
 end
 
 function Lightning.update(dt, players)
@@ -62,6 +72,8 @@ function Lightning._spawnStrike(players)
 end
 
 function Lightning._doStrike(x, players)
+    strikeOccurred = true  -- notify main loop for screen shake
+
     -- Create visual bolt
     local bolt = {
         x = x,
@@ -74,10 +86,18 @@ function Lightning._doStrike(x, players)
     -- Damage players in radius
     if players then
         for _, player in ipairs(players) do
-            if player.life and player.life > 0 then
+            if player.life and player.life > 0 and not player.invulnerable then
                 local dx = math.abs(player.x - x)
                 if dx <= Lightning.STRIKE_RADIUS then
-                    player.life = math.max(0, player.life - Lightning.DAMAGE)
+                    local dmg = Lightning.DAMAGE
+                    -- Armor absorbs damage first
+                    if player.armor and player.armor > 0 then
+                        local absorbed = math.min(player.armor, dmg)
+                        dmg = dmg - absorbed
+                        player.armor = player.armor - absorbed
+                        if player.armor <= 0 then player.armor = 0 end
+                    end
+                    player.life = math.max(0, player.life - dmg)
                     player.hitFlash = 0.25
                     Sounds.play("player_hurt")
                 end
@@ -160,7 +180,12 @@ end
 -- Apply state from network (clients receive from host)
 function Lightning.setState(state)
     if state then
+        -- Detect new strikes for screen shake on clients
+        local oldCount = #strikes
         strikes = state.strikes or {}
+        if #strikes > oldCount then
+            strikeOccurred = true
+        end
         warnings = state.warnings or {}
 		-- Default when field is missing (nil)
 		if state.nextStrikeTimer ~= nil then

@@ -24,6 +24,10 @@ local countdownValue
 local splashTimer = 0
 local networkSyncTimer = 0
 
+-- Screen shake state
+local screenShakeTimer = 0     -- remaining shake time (seconds)
+local screenShakeIntensity = 0 -- current shake magnitude (pixels)
+
 -- Demo mode state
 local demoMode = false     -- true when playing demo mode with bots
 local bots = {}            -- bot AI state for each bot player
@@ -47,12 +51,15 @@ local GAME_WIDTH = 1280
 local GAME_HEIGHT = 720
 local scaleX, scaleY, offsetX, offsetY = 1, 1, 0, 0
 
+-- Fun font path (Fredoka One – bubbly rounded display font, OFL licensed)
+local FONT_PATH = "assets/fonts/FredokaOne-Regular.ttf"
+
 -- Font cache: avoid allocating new Font objects every frame.
 local _fontCache = {}
 local function getFont(size)
     local f = _fontCache[size]
     if not f then
-        f = love.graphics.newFont(size)
+        f = love.graphics.newFont(FONT_PATH, size)
         _fontCache[size] = f
     end
     return f
@@ -185,12 +192,25 @@ function love.update(dt)
             -- Resolve collisions between all pairs
             Physics.resolveAllCollisions(players, dt)
 
+            -- Spawn dash impact particles
+            for _, impact in ipairs(Physics.consumeDashImpacts()) do
+                Projectiles.spawnDashImpact(impact.x, impact.y)
+                screenShakeTimer = 0.15
+                screenShakeIntensity = 4
+            end
+
             -- Update projectiles
             Projectiles.update(dt, players)
 
             -- Update lightning (host-authoritative)
             if Network.getRole() == Network.ROLE_HOST or Network.getRole() == Network.ROLE_NONE then
                 Lightning.update(dt, players)
+            end
+
+            -- Screen shake on lightning strike (works for host, client, and solo)
+            if Lightning.consumeStrike() then
+                screenShakeTimer = 0.3
+                screenShakeIntensity = 6
             end
 
             -- Update dropboxes
@@ -220,6 +240,15 @@ function love.update(dt)
             processNetworkMessages()
         end
     end
+
+    -- Decay screen shake
+    if screenShakeTimer > 0 then
+        screenShakeTimer = screenShakeTimer - dt
+        if screenShakeTimer <= 0 then
+            screenShakeTimer = 0
+            screenShakeIntensity = 0
+        end
+    end
 end
 
 -- ─────────────────────────────────────────────
@@ -228,7 +257,9 @@ end
 function love.draw()
     -- Apply scaling and offset for proper aspect ratio
     love.graphics.push()
-    love.graphics.translate(offsetX, offsetY)
+    local shakeX = screenShakeTimer > 0 and (math.random() - 0.5) * screenShakeIntensity * 2 or 0
+    local shakeY = screenShakeTimer > 0 and (math.random() - 0.5) * screenShakeIntensity * 2 or 0
+    love.graphics.translate(offsetX + shakeX, offsetY + shakeY)
     love.graphics.scale(scaleX, scaleY)
 
     local W = GAME_WIDTH
@@ -358,6 +389,13 @@ function love.keypressed(key)
     if gameState == "playing" then
         local localPlayer = getLocalPlayer()
         if localPlayer and localPlayer.life > 0 and localPlayer.controls then
+            -- Try dash first (double-tap detection)
+            if localPlayer:handleKeyForDash(key) then
+                Sounds.play("dash_whoosh")
+                if Network.getRole() ~= Network.ROLE_NONE then
+                    Network.send("player_dash", {pid = localPlayer.id, dir = localPlayer.dashDir}, true)
+                end
+            end
             if key == localPlayer.controls.jump then
                 localPlayer:jump()
                 if Network.getRole() ~= Network.ROLE_NONE then
@@ -483,7 +521,7 @@ function drawControlsHint(W, H)
 	love.graphics.setFont(getFont(11))
     love.graphics.setColor(1, 1, 1, 0.25)
     local pid = Network.getLocalPlayerId()
-    local hint = "P" .. pid .. ": A/D move · Space jump · W cast    |    ESC menu"
+    local hint = "P" .. pid .. ": A/D move (double-tap dash) · Space jump · W cast    |    ESC menu"
     love.graphics.printf(hint, 0, H - 22, W, "center")
 end
 
@@ -498,7 +536,7 @@ end
 function drawDemoHint(W, H)
 	love.graphics.setFont(getFont(11))
     love.graphics.setColor(0.4, 1, 0.6, 0.35)
-    local hint = "DEMO MODE — P1: A/D move · Space jump · W cast    |    ESC menu"
+    local hint = "DEMO MODE — P1: A/D move (double-tap dash) · Space jump · W cast    |    ESC menu"
     love.graphics.printf(hint, 0, H - 22, W, "center")
 end
 
@@ -511,16 +549,16 @@ function drawSplash(W, H)
 
     -- Title with pulsing effect
     local pulse = 0.7 + 0.3 * math.sin(splashTimer * 2.5)
-	love.graphics.setFont(getFont(64))
+    love.graphics.setFont(getFont(64))
     love.graphics.setColor(1.0, 0.85, 0.2, pulse)
     love.graphics.printf("BATTLE OF THE SHAPES", 0, H / 2 - 80, W, "center")
 
-	love.graphics.setFont(getFont(24))
+    love.graphics.setFont(getFont(28))
     love.graphics.setColor(0.7, 0.7, 0.9, pulse * 0.8)
     love.graphics.printf("B.O.T.S", 0, H / 2 + 10, W, "center")
 
     if splashTimer > 1.0 then
-	    love.graphics.setFont(getFont(16))
+        love.graphics.setFont(getFont(18))
         local blink = 0.4 + 0.6 * math.sin(splashTimer * 4)
         love.graphics.setColor(1, 1, 1, blink)
         love.graphics.printf("Press any key to continue", 0, H / 2 + 80, W, "center")
@@ -601,7 +639,7 @@ end
 -- Settings Screen
 -- ─────────────────────────────────────────────
 function handleSettingsKey(key)
-    local maxRows = 4
+    local maxRows = 5
     if key == "up" or key == "w" then
         settingsRow = settingsRow - 1
         if settingsRow < 1 then settingsRow = maxRows end
@@ -631,6 +669,9 @@ function handleSettingsKey(key)
         elseif settingsRow == 4 then
             -- Toggle aim assist
             Config.setAimAssist(not Config.getAimAssist())
+        elseif settingsRow == 5 then
+            -- Toggle demo invulnerability
+            Config.setDemoInvulnerable(not Config.getDemoInvulnerable())
         end
     elseif key == "backspace" then
         gameState = "menu"
@@ -650,7 +691,7 @@ function drawSettings(W, H)
 	local detailFont = getFont(18)
 
     -- Row 1: Control Scheme
-    local row1Y = 170
+    local row1Y = 150
     love.graphics.setFont(labelFont)
     if settingsRow == 1 then
         love.graphics.setColor(1.0, 1.0, 0.4)
@@ -686,7 +727,7 @@ function drawSettings(W, H)
     end
 
     -- Row 2: Player Count
-    local row2Y = 305
+    local row2Y = 250
     love.graphics.setFont(labelFont)
     if settingsRow == 2 then
         love.graphics.setColor(1.0, 1.0, 0.4)
@@ -713,7 +754,7 @@ function drawSettings(W, H)
     end
 
     -- Row 3: Server Mode
-    local row3Y = 390
+    local row3Y = 340
     love.graphics.setFont(labelFont)
     if settingsRow == 3 then
         love.graphics.setColor(1.0, 1.0, 0.4)
@@ -749,7 +790,7 @@ function drawSettings(W, H)
     end
 
     -- Row 4: Aim Assist
-    local row4Y = 500
+    local row4Y = 430
     love.graphics.setFont(labelFont)
     if settingsRow == 4 then
         love.graphics.setColor(1.0, 1.0, 0.4)
@@ -782,6 +823,42 @@ function drawSettings(W, H)
         love.graphics.printf("Fireballs auto-target nearest enemy", 0, row4Y + 60, W, "center")
     else
         love.graphics.printf("Fireballs shoot in facing direction", 0, row4Y + 60, W, "center")
+    end
+
+    -- Row 5: Demo Invulnerability
+    local row5Y = 520
+    love.graphics.setFont(labelFont)
+    if settingsRow == 5 then
+        love.graphics.setColor(1.0, 1.0, 0.4)
+    else
+        love.graphics.setColor(0.6, 0.6, 0.6)
+    end
+    love.graphics.printf("Demo Invulnerability:", 0, row5Y, W, "center")
+
+    love.graphics.setFont(valueFont)
+    local di = Config.getDemoInvulnerable()
+    if di then
+        if settingsRow == 5 then
+            love.graphics.setColor(0.4, 1.0, 0.4)
+        else
+            love.graphics.setColor(0.3, 0.7, 0.3)
+        end
+        love.graphics.printf("< ON >", 0, row5Y + 30, W, "center")
+    else
+        if settingsRow == 5 then
+            love.graphics.setColor(1.0, 0.5, 0.4)
+        else
+            love.graphics.setColor(0.7, 0.4, 0.3)
+        end
+        love.graphics.printf("< OFF >", 0, row5Y + 30, W, "center")
+    end
+
+    love.graphics.setFont(detailFont)
+    love.graphics.setColor(0.5, 0.5, 0.5)
+    if di then
+        love.graphics.printf("Player 1 cannot take damage in demo mode", 0, row5Y + 60, W, "center")
+    else
+        love.graphics.printf("Normal damage rules in demo mode", 0, row5Y + 60, W, "center")
     end
 
 	love.graphics.setFont(getFont(14))
@@ -1097,6 +1174,17 @@ function processNetworkMessages()
                 end
             end
 
+        elseif msg.type == "player_dash" then
+            -- Remote player dashed
+            local data = msg.data
+            if data and data.pid and players[data.pid] then
+                players[data.pid]:dash(data.dir)
+                Sounds.play("dash_whoosh")
+                if Network.getRole() == Network.ROLE_HOST then
+                    Network.relay(data.pid, "player_dash", data, true)
+                end
+            end
+
         elseif msg.type == "game_over" then
             local data = msg.data
             if data and data.winner ~= nil then
@@ -1180,7 +1268,8 @@ function processNetworkMessages()
                             newCharges[i] = {
                                 x = cx,
                                 y = cy,
-                                age = data["c" .. i .. "a"] or 0
+                                age = data["c" .. i .. "a"] or 0,
+                                kind = data["c" .. i .. "k"] or "health"
                             }
                         end
                     end
@@ -1206,7 +1295,10 @@ function sendGameState()
             x = state.x, y = state.y,
             vx = state.vx, vy = state.vy,
             life = state.life, will = state.will,
-            facing = state.facingRight and 1 or 0
+            facing = state.facingRight and 1 or 0,
+            armor = state.armor,
+            dmgBoost = state.damageBoost,
+            dmgShots = state.damageBoostShots
         }, false)
     end
 
@@ -1245,6 +1337,7 @@ function sendGameState()
         ddata["c" .. i .. "x"] = charge.x
         ddata["c" .. i .. "y"] = charge.y
         ddata["c" .. i .. "a"] = charge.age
+        ddata["c" .. i .. "k"] = charge.kind or "health"
     end
     Network.send("dropbox_sync", ddata, false)
 end
@@ -1255,11 +1348,12 @@ function sendClientState()
     local p = players[pid]
     if not p then return end
     local state = p:getNetState()
+    -- Client only sends position/velocity/facing; host is authoritative for
+    -- life, will, armor, and damage boost.
     Network.send("client_state", {
         pid = pid,
         x = state.x, y = state.y,
         vx = state.vx, vy = state.vy,
-        life = state.life, will = state.will,
         facing = state.facingRight and 1 or 0
     }, false)
 end
@@ -1275,13 +1369,24 @@ function applyGameState(data)
             x = data.x, y = data.y,
             vx = data.vx, vy = data.vy,
             life = data.life, will = data.will,
-            facingRight = (data.facing == 1)
+            facingRight = (data.facing == 1),
+            armor = data.armor,
+            damageBoost = data.dmgBoost,
+            damageBoostShots = data.dmgShots
         })
     else
-        -- Local player: only apply authoritative life from host
-        -- (host computes lightning damage that client can't compute locally)
-	        if data.life ~= nil then
+        -- Local player: only apply authoritative life/buffs from host
+        if data.life ~= nil then
             players[pid].life = data.life
+        end
+        if data.armor ~= nil then
+            players[pid].armor = data.armor
+        end
+        if data.dmgBoost ~= nil then
+            players[pid].damageBoost = data.dmgBoost
+        end
+        if data.dmgShots ~= nil then
+            players[pid].damageBoostShots = data.dmgShots
         end
     end
 end
@@ -1468,6 +1573,9 @@ function startDemoMode()
     players[2]:setShape(bot1Shape)
     players[3]:setShape(bot2Shape)
 
+    -- Apply demo invulnerability to P1 if setting is enabled
+    players[1].invulnerable = Config.getDemoInvulnerable()
+
     -- Create bot AI states
     bots = {
         [2] = createBotState(2),
@@ -1519,11 +1627,24 @@ function updateDemoMode(dt)
     -- Resolve collisions
     Physics.resolveAllCollisions(players, dt)
 
+    -- Spawn dash impact particles
+    for _, impact in ipairs(Physics.consumeDashImpacts()) do
+        Projectiles.spawnDashImpact(impact.x, impact.y)
+        screenShakeTimer = 0.15
+        screenShakeIntensity = 4
+    end
+
     -- Update projectiles
     Projectiles.update(dt, players)
 
     -- Update lightning
     Lightning.update(dt, players)
+
+    -- Screen shake on lightning strike
+    if Lightning.consumeStrike() then
+        screenShakeTimer = 0.3
+        screenShakeIntensity = 6
+    end
 
     -- Update dropboxes
     Dropbox.update(dt, players)

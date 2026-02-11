@@ -287,7 +287,10 @@ sendGameState = function()
             x = state.x, y = state.y,
             vx = state.vx, vy = state.vy,
             life = state.life, will = state.will,
-            facing = state.facingRight and 1 or 0
+            facing = state.facingRight and 1 or 0,
+            armor = state.armor,
+            dmgBoost = state.damageBoost,
+            dmgShots = state.damageBoostShots
         }, false)
     end
 

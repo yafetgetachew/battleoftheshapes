@@ -22,15 +22,31 @@ local effects = {}
 -- Spawning
 -- ─────────────────────────────────────────────
 
+-- Helper: consume damage boost from caster and return total damage for this shot
+local function _consumeBoost(caster)
+    local dmg = Projectiles.DAMAGE
+    if caster.damageBoostShots and caster.damageBoostShots > 0 then
+        dmg = dmg + (caster.damageBoost or 0)
+        caster.damageBoostShots = caster.damageBoostShots - 1
+        if caster.damageBoostShots <= 0 then
+            caster.damageBoost = 0
+            caster.damageBoostShots = 0
+        end
+    end
+    return dmg
+end
+
 -- Spawn a fireball from the caster toward the target horizontally
 function Projectiles.spawnFireball(caster, target)
     if caster.will < Projectiles.WILL_COST then return false end
     caster.will = caster.will - Projectiles.WILL_COST
     local dir = (target.x > caster.x) and 1 or -1
+    local dmg = _consumeBoost(caster)
     local proj = {
         type     = "fireball",
         owner    = caster.id,
         targetId = target.id,
+        damage   = dmg,
         x        = caster.x + dir * (caster.shapeWidth / 2 + 10),
         y        = caster.y,
         vx       = Projectiles.FIREBALL_SPEED * dir,
@@ -49,10 +65,12 @@ function Projectiles.spawnFireballDirectional(caster, facingRight)
     if caster.will < Projectiles.WILL_COST then return false end
     caster.will = caster.will - Projectiles.WILL_COST
     local dir = facingRight and 1 or -1
+    local dmg = _consumeBoost(caster)
     local proj = {
         type     = "fireball",
         owner    = caster.id,
         targetId = nil,  -- no specific target
+        damage   = dmg,
         x        = caster.x + dir * (caster.shapeWidth / 2 + 10),
         y        = caster.y,
         vx       = Projectiles.FIREBALL_SPEED * dir,
@@ -98,8 +116,16 @@ function Projectiles.update(dt, players)
 	            if player.id ~= p.owner and (player.life or 0) > 0 then
 	                if Projectiles._hitTest(p, player) then
 	                    -- Only apply damage if we're the authority (host/solo/demo)
-	                    if isAuthority then
-	                        player.life = math.max(0, player.life - Projectiles.DAMAGE)
+	                    if isAuthority and not player.invulnerable then
+	                        local dmg = p.damage or Projectiles.DAMAGE
+	                        -- Armor absorbs damage first, then vanishes
+	                        if player.armor and player.armor > 0 then
+	                            local absorbed = math.min(player.armor, dmg)
+	                            dmg = dmg - absorbed
+	                            player.armor = player.armor - absorbed
+	                            if player.armor <= 0 then player.armor = 0 end
+	                        end
+	                        player.life = math.max(0, player.life - dmg)
 	                    end
 	                    player.hitFlash = 0.25   -- flash duration (visual only)
 	                    Projectiles._spawnHitEffect(p.x, p.y, p.type)
@@ -162,17 +188,26 @@ function Projectiles.draw()
 
     -- Draw hit effects
     for _, e in ipairs(effects) do
+        local isDash = (e.projType == "dash")
         -- Expanding ring
         local ringAlpha = math.max(0, 1 - e.age / 0.4)
-        local ringR = 10 + e.age * 120
-        love.graphics.setColor(1.0, 0.8, 0.2, ringAlpha * 0.5)
+        local ringR = 10 + e.age * (isDash and 150 or 120)
+        if isDash then
+            love.graphics.setColor(0.4, 0.8, 1.0, ringAlpha * 0.6)
+        else
+            love.graphics.setColor(1.0, 0.8, 0.2, ringAlpha * 0.5)
+        end
         love.graphics.setLineWidth(3)
         love.graphics.circle("line", e.x, e.y, ringR)
 
         -- Spark particles
         for _, pt in ipairs(e.particles) do
             local alpha = math.max(0, pt.life / pt.maxLife)
-            love.graphics.setColor(1.0, 0.9, 0.3, alpha)
+            if isDash then
+                love.graphics.setColor(0.5, 0.85, 1.0, alpha)
+            else
+                love.graphics.setColor(1.0, 0.9, 0.3, alpha)
+            end
             love.graphics.circle("fill", pt.x, pt.y, pt.r * (pt.life / pt.maxLife))
         end
     end
@@ -271,6 +306,31 @@ function Projectiles._spawnHitEffect(x, y, projType)
             r = math.random() * 3 + 1.5,
             life = 0.3 + math.random() * 0.3,
             maxLife = 0.6
+        })
+    end
+    table.insert(effects, e)
+end
+
+-- Spawn a dash impact particle burst (cyan/blue colored)
+function Projectiles.spawnDashImpact(x, y)
+    local e = {
+        x = x,
+        y = y,
+        projType = "dash",
+        age = 0,
+        particles = {}
+    }
+    for _ = 1, 14 do
+        local angle = math.random() * math.pi * 2
+        local speed = 120 + math.random() * 250
+        table.insert(e.particles, {
+            x = x,
+            y = y,
+            vx = math.cos(angle) * speed,
+            vy = math.sin(angle) * speed - 60,
+            r = math.random() * 3 + 1,
+            life = 0.25 + math.random() * 0.3,
+            maxLife = 0.55
         })
     end
     table.insert(effects, e)

@@ -4,13 +4,16 @@
 local Shapes = require("shapes")
 
 local HUD = {}
+-- Fun font path (Fredoka One – bubbly rounded display font, OFL licensed)
+local FONT_PATH = "assets/fonts/FredokaOne-Regular.ttf"
+
 -- Cache HUD fonts to avoid allocating new Font objects every frame.
 local _nameFont
 local _statFont
 local function ensureFonts()
     if _nameFont then return end
-    _nameFont = love.graphics.newFont(14)
-    _statFont = love.graphics.newFont(11)
+    _nameFont = love.graphics.newFont(FONT_PATH, 14)
+    _statFont = love.graphics.newFont(FONT_PATH, 11)
 end
 
 
@@ -91,6 +94,20 @@ function HUD.drawPlayerInfo(player, x, y)
         "Will: " .. math.floor(player.will),
         x, willY, BAR_WIDTH, "center"
     )
+
+    -- ── Buff indicators ──
+    local buffY = willY + WILL_HEIGHT + 3
+    local buffX = x
+    love.graphics.setFont(statFont)
+    if player.armor and player.armor > 0 then
+        love.graphics.setColor(0.7, 0.7, 0.75, 0.9)
+        love.graphics.printf("🛡 " .. math.floor(player.armor), buffX, buffY, BAR_WIDTH / 2, "center")
+        buffX = buffX + BAR_WIDTH / 2
+    end
+    if player.damageBoostShots and player.damageBoostShots > 0 then
+        love.graphics.setColor(1.0, 0.3, 0.2, 0.9)
+        love.graphics.printf("⚔ x" .. player.damageBoostShots, buffX, buffY, BAR_WIDTH / 2, "center")
+    end
 end
 
 -- Linearly interpolate between two {r,g,b} colors

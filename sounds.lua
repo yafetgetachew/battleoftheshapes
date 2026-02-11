@@ -81,6 +81,30 @@ function Sounds.load()
         return (noise * 0.6 + rumble + crack) * env
     end)
     sfx.lightning:setVolume(0.5)
+
+    -- Dash whoosh: short rising pitch airy whoosh
+    sfx.dash_whoosh = generateSound(0.15, sr, function(t, dur)
+        local env = (1 - t / dur)
+        env = env * env
+        local freq = 300 + t * 3000
+        local noise = (math.random() * 2 - 1) * 0.5
+        local tone = math.sin(2 * math.pi * freq * t) * 0.3
+        return (tone + noise) * env
+    end)
+    sfx.dash_whoosh:setVolume(0.35)
+
+    -- Dash impact: punchy low thud on collision
+    sfx.dash_impact = generateSound(0.25, sr, function(t, dur)
+        local env = (1 - t / dur)
+        env = env * env * env
+        local freq = 80 - t * 100
+        local tone = math.sin(2 * math.pi * freq * t) * 0.7
+        local noise = (math.random() * 2 - 1) * 0.3
+        local click = 0
+        if t < 0.015 then click = (1 - t / 0.015) * 0.9 end
+        return (tone + noise + click) * env
+    end)
+    sfx.dash_impact:setVolume(0.45)
 end
 
 function Sounds.play(name)

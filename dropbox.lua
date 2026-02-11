@@ -11,6 +11,9 @@ local Dropbox = {}
 Dropbox.SPAWN_INTERVAL = 15      -- seconds between spawns
 Dropbox.BOX_SIZE = 40            -- width/height of the box
 Dropbox.LIFE_HEAL = 30           -- health restored by life charge
+Dropbox.ARMOR_AMOUNT = 15        -- armor points granted
+Dropbox.DAMAGE_BOOST = 10        -- extra damage per shot
+Dropbox.DAMAGE_BOOST_SHOTS = 3   -- number of boosted shots
 Dropbox.CHARGE_SIZE = 24         -- size of the life charge pickup
 Dropbox.CHARGE_LIFETIME = 10     -- seconds before charge despawns
 Dropbox.CHARGE_BOB_SPEED = 3     -- bobbing animation speed
@@ -111,25 +114,33 @@ function Dropbox.update(dt, players)
             end
         end
 
-        -- Update life charges (host only)
+        -- Update charges (host only)
         for i = #charges, 1, -1 do
             local charge = charges[i]
             charge.age = charge.age + dt
 
             -- Check player pickup
+            local picked = false
             for _, player in ipairs(players) do
                 if player.life > 0 and Dropbox._playerTouchesCharge(player, charge) then
-                    -- Heal player
-                    player.life = math.min(player.maxLife, player.life + Dropbox.LIFE_HEAL)
+                    if charge.kind == "health" then
+                        player.life = math.min(player.maxLife, player.life + Dropbox.LIFE_HEAL)
+                    elseif charge.kind == "armor" then
+                        player.armor = Dropbox.ARMOR_AMOUNT
+                    elseif charge.kind == "damage" then
+                        player.damageBoost = Dropbox.DAMAGE_BOOST
+                        player.damageBoostShots = Dropbox.DAMAGE_BOOST_SHOTS
+                    end
                     player.hitFlash = 0.15
                     Sounds.play("fireball_cast")
                     table.remove(charges, i)
+                    picked = true
                     break
                 end
             end
 
             -- Remove expired charges
-            if charge.age >= Dropbox.CHARGE_LIFETIME then
+            if not picked and charge.age >= Dropbox.CHARGE_LIFETIME then
                 table.remove(charges, i)
             end
         end
@@ -226,11 +237,16 @@ function Dropbox.hitBox(projX, projY, projRadius)
     return false
 end
 
+-- Charge types with spawn weights
+local CHARGE_TYPES = { "health", "health", "armor", "damage" }  -- health is more common
+
 function Dropbox._spawnCharge(x, y)
+    local kind = CHARGE_TYPES[math.random(#CHARGE_TYPES)]
     local charge = {
         x = x,
         y = y,
-        age = 0
+        age = 0,
+        kind = kind
     }
     table.insert(charges, charge)
 end
@@ -264,23 +280,56 @@ function Dropbox.draw()
         love.graphics.printf("?", box.x - halfSize, box.y - 8, Dropbox.BOX_SIZE, "center")
     end
 
-    -- Draw life charges
+    -- Draw charges (health / armor / damage)
     for _, charge in ipairs(charges) do
         local bob = math.sin(charge.age * Dropbox.CHARGE_BOB_SPEED) * 4
         local halfSize = Dropbox.CHARGE_SIZE / 2
-        local alpha = charge.age > Dropbox.CHARGE_LIFETIME - 2 and 
+        local alpha = charge.age > Dropbox.CHARGE_LIFETIME - 2 and
                       (0.5 + 0.5 * math.sin(charge.age * 10)) or 1  -- blink when expiring
-        -- Glow
-        love.graphics.setColor(0.2, 0.9, 0.3, alpha * 0.3)
-        love.graphics.circle("fill", charge.x, charge.y + bob, halfSize * 1.5)
-        -- Core
-        love.graphics.setColor(0.3, 1.0, 0.4, alpha * 0.9)
-        love.graphics.circle("fill", charge.x, charge.y + bob, halfSize)
-        -- Cross (health symbol)
-        love.graphics.setColor(1, 1, 1, alpha * 0.9)
-        love.graphics.setLineWidth(3)
-        love.graphics.line(charge.x - 6, charge.y + bob, charge.x + 6, charge.y + bob)
-        love.graphics.line(charge.x, charge.y + bob - 6, charge.x, charge.y + bob + 6)
+        local cy = charge.y + bob
+        local kind = charge.kind or "health"
+
+        if kind == "health" then
+            -- Green glow + cross
+            love.graphics.setColor(0.2, 0.9, 0.3, alpha * 0.3)
+            love.graphics.circle("fill", charge.x, cy, halfSize * 1.5)
+            love.graphics.setColor(0.3, 1.0, 0.4, alpha * 0.9)
+            love.graphics.circle("fill", charge.x, cy, halfSize)
+            love.graphics.setColor(1, 1, 1, alpha * 0.9)
+            love.graphics.setLineWidth(3)
+            love.graphics.line(charge.x - 6, cy, charge.x + 6, cy)
+            love.graphics.line(charge.x, cy - 6, charge.x, cy + 6)
+
+        elseif kind == "armor" then
+            -- Grey/silver glow + shield icon
+            love.graphics.setColor(0.6, 0.6, 0.65, alpha * 0.3)
+            love.graphics.circle("fill", charge.x, cy, halfSize * 1.5)
+            love.graphics.setColor(0.75, 0.75, 0.8, alpha * 0.9)
+            love.graphics.circle("fill", charge.x, cy, halfSize)
+            -- Shield shape (chevron)
+            love.graphics.setColor(1, 1, 1, alpha * 0.9)
+            love.graphics.setLineWidth(2.5)
+            love.graphics.polygon("line",
+                charge.x, cy - 8,
+                charge.x - 7, cy - 3,
+                charge.x - 7, cy + 4,
+                charge.x, cy + 8,
+                charge.x + 7, cy + 4,
+                charge.x + 7, cy - 3)
+
+        elseif kind == "damage" then
+            -- Red glow + sword/bolt icon
+            love.graphics.setColor(0.9, 0.15, 0.1, alpha * 0.3)
+            love.graphics.circle("fill", charge.x, cy, halfSize * 1.5)
+            love.graphics.setColor(1.0, 0.3, 0.2, alpha * 0.9)
+            love.graphics.circle("fill", charge.x, cy, halfSize)
+            -- Lightning bolt icon
+            love.graphics.setColor(1, 1, 1, alpha * 0.9)
+            love.graphics.setLineWidth(2.5)
+            love.graphics.line(charge.x + 2, cy - 8, charge.x - 3, cy)
+            love.graphics.line(charge.x - 3, cy, charge.x + 3, cy)
+            love.graphics.line(charge.x + 3, cy, charge.x - 2, cy + 8)
+        end
     end
     love.graphics.setLineWidth(1)
 end

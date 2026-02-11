@@ -5,15 +5,18 @@ local Shapes = require("shapes")
 
 local Selection = {}
 
+-- Fun font path (Fredoka One – bubbly rounded display font, OFL licensed)
+local FONT_PATH = "assets/fonts/FredokaOne-Regular.ttf"
+
 -- Cache fonts to avoid allocating every frame.
 local _titleFont
 local _subFont
 local _statsFont
 local function ensureFonts()
     if _titleFont then return end
-    _titleFont = love.graphics.newFont(32)
-    _subFont = love.graphics.newFont(16)
-    _statsFont = love.graphics.newFont(13)
+    _titleFont = love.graphics.newFont(FONT_PATH, 32)
+    _subFont = love.graphics.newFont(FONT_PATH, 16)
+    _statsFont = love.graphics.newFont(FONT_PATH, 13)
 end
 
 function Selection.new(localPlayerId, playerCount)

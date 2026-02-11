@@ -9,7 +9,8 @@ local defaultConfig = {
     controlScheme = "wasd",  -- "wasd" or "arrows"
     playerCount = "3",       -- "2" or "3"
     serverMode = "false",    -- "true" or "false" (dedicated server / relay mode)
-    aimAssist = "true"       -- "true" or "false" (auto-aim at nearest enemy)
+    aimAssist = "true",      -- "true" or "false" (auto-aim at nearest enemy)
+    demoInvulnerable = "false" -- "true" or "false" (invulnerable in demo mode)
 }
 
 -- IP history (stored separately, not in defaultConfig)
@@ -141,6 +142,17 @@ end
 -- Set aim assist
 function Config.setAimAssist(enabled)
     currentConfig.aimAssist = enabled and "true" or "false"
+    Config.save()
+end
+
+-- Get demo invulnerability setting
+function Config.getDemoInvulnerable()
+    return currentConfig.demoInvulnerable == "true"
+end
+
+-- Set demo invulnerability
+function Config.setDemoInvulnerable(enabled)
+    currentConfig.demoInvulnerable = enabled and "true" or "false"
     Config.save()
 end
 
