@@ -1,0 +1,36 @@
+# makelove configuration for B.O.T.S (Battle of the Shapes)
+# Run with: makelove
+
+name = "BOTS"
+# Note: appimage can only be built on Linux
+default_targets = ["win64", "macos"]
+love_version = "11.4"
+
+# Build directory
+build_directory = "builds"
+
+# Files to include in the .love file
+# Patterns starting with "-" exclude, "+" or no prefix include
+love_files = [
+    "+./*.lua",
+    "+./assets",
+    "+./assets/*",
+    "+./conf.lua",
+    "-./builds",
+    "-./builds/*",
+    "-./makelove.toml",
+    "-./server",
+    "-./server/*",
+    "-*.md",
+    "-./.*",
+]
+
+# Windows 64-bit build
+[win64]
+
+# macOS build
+[macos]
+
+# Linux AppImage build
+[appimage]
+
