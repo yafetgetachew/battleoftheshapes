@@ -64,6 +64,7 @@ function Player:spawn(x, y)
 end
 
 function Player:handleInput(dt)
+    if not self.controls then return end  -- no controls (e.g. bot players)
     local moving = false
     if love.keyboard.isDown(self.controls.left) then
         self.vx = -self.speed

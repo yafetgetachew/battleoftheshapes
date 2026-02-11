@@ -4,6 +4,7 @@
 
 local Physics = require("physics")
 local Sounds  = require("sounds")
+local Dropbox = require("dropbox")
 
 local Projectiles = {}
 
@@ -56,18 +57,27 @@ function Projectiles.update(dt, players)
         -- Spawn trail particles
         Projectiles._spawnTrail(p)
 
+        -- Check collision with dropboxes first
+        local hit = false
+        if Dropbox.hitBox(p.x, p.y, Projectiles.FIREBALL_RADIUS) then
+            Projectiles._spawnHitEffect(p.x, p.y, p.type)
+            Sounds.play("fireball_hit")
+            hit = true
+        end
+
 	    -- Check collision with target player
-	    local hit = false
-	    for _, player in ipairs(players) do
-	        -- Ignore dead players so projectiles don't fizzle on corpses / disconnected slots
-	        if player.id ~= p.owner and (player.life or 0) > 0 then
-	            if Projectiles._hitTest(p, player) then
-	                player.life = math.max(0, player.life - Projectiles.DAMAGE)
-	                player.hitFlash = 0.25   -- flash duration
-	                Projectiles._spawnHitEffect(p.x, p.y, p.type)
-	                Sounds.play("fireball_hit")
-	                hit = true
-	                break
+	    if not hit then
+	        for _, player in ipairs(players) do
+	            -- Ignore dead players so projectiles don't fizzle on corpses / disconnected slots
+	            if player.id ~= p.owner and (player.life or 0) > 0 then
+	                if Projectiles._hitTest(p, player) then
+	                    player.life = math.max(0, player.life - Projectiles.DAMAGE)
+	                    player.hitFlash = 0.25   -- flash duration
+	                    Projectiles._spawnHitEffect(p.x, p.y, p.type)
+	                    Sounds.play("fireball_hit")
+	                    hit = true
+	                    break
+	                end
 	            end
 	        end
 	    end

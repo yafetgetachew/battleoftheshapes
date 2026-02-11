@@ -11,6 +11,7 @@ local Network     = require("network")
 local Lightning   = require("lightning")
 local Sounds      = require("sounds")
 local Config      = require("config")
+local Dropbox     = require("dropbox")
 
 -- Game states: "splash", "menu", "settings", "connecting", "selection", "countdown", "playing", "gameover"
 -- (Note: "browsing" state was removed - use "Join by IP" instead)
@@ -23,8 +24,12 @@ local countdownValue
 local splashTimer = 0
 local networkSyncTimer = 0
 
+-- Demo mode state
+local demoMode = false     -- true when playing demo mode with bots
+local bots = {}            -- bot AI state for each bot player
+
 -- Menu state
-local menuChoice = 1       -- 1 = Host, 2 = Join, 3 = Settings
+local menuChoice = 1       -- 1 = Host, 2 = Join, 3 = Demo, 4 = Settings
 local joinAddress = ""
 local menuStatus = ""
 local settingsRow = 1      -- 1 = Control Scheme, 2 = Player Count, 3 = Server Mode
@@ -158,50 +163,61 @@ function love.update(dt)
         if countdownTimer <= 0 then
             gameState = "playing"
             Lightning.reset()
+            Dropbox.reset()
         end
 
     elseif gameState == "playing" then
-        Network.update(dt)
-        processNetworkMessages()
+        if demoMode then
+            -- Demo mode: use local bot AI update
+            updateDemoMode(dt)
+        else
+            Network.update(dt)
+            processNetworkMessages()
 
-        -- Update all players
-        for _, p in ipairs(players) do
-            if p.life > 0 then
-                p:update(dt)
-            end
-        end
-
-        -- Resolve collisions between all pairs
-        Physics.resolveAllCollisions(players, dt)
-
-        -- Update projectiles
-        Projectiles.update(dt, players)
-
-        -- Update lightning (host-authoritative)
-        if Network.getRole() == Network.ROLE_HOST or Network.getRole() == Network.ROLE_NONE then
-            Lightning.update(dt, players)
-        end
-
-        -- Network sync: host broadcasts all state, clients send their own state
-        if Network.getRole() ~= Network.ROLE_NONE then
-            networkSyncTimer = networkSyncTimer + dt
-            if networkSyncTimer >= Network.TICK_RATE then
-                networkSyncTimer = 0
-                if Network.getRole() == Network.ROLE_HOST then
-                    sendGameState()
-                else
-                    -- Client sends local player state to host
-                    sendClientState()
+            -- Update all players
+            for _, p in ipairs(players) do
+                if p.life > 0 then
+                    p:update(dt)
                 end
             end
+
+            -- Resolve collisions between all pairs
+            Physics.resolveAllCollisions(players, dt)
+
+            -- Update projectiles
+            Projectiles.update(dt, players)
+
+            -- Update lightning (host-authoritative)
+            if Network.getRole() == Network.ROLE_HOST or Network.getRole() == Network.ROLE_NONE then
+                Lightning.update(dt, players)
+            end
+
+            -- Update dropboxes
+            Dropbox.update(dt, players)
+
+            -- Network sync: host broadcasts all state, clients send their own state
+            if Network.getRole() ~= Network.ROLE_NONE then
+                networkSyncTimer = networkSyncTimer + dt
+                if networkSyncTimer >= Network.TICK_RATE then
+                    networkSyncTimer = 0
+                    if Network.getRole() == Network.ROLE_HOST then
+                        sendGameState()
+                    else
+                        -- Client sends local player state to host
+                        sendClientState()
+                    end
+                end
+            end
+
+            -- Check for game over (last player standing)
+            checkGameOver()
         end
 
-        -- Check for game over (last player standing)
-        checkGameOver()
-
     elseif gameState == "gameover" then
-        Network.update(dt)
-        processNetworkMessages()
+        if not demoMode then
+            Network.update(dt)
+            processNetworkMessages()
+        end
     end
 end
 
@@ -249,6 +265,9 @@ function love.draw()
         -- ── Projectiles ──
         Projectiles.draw()
 
+        -- ── Dropboxes ──
+        Dropbox.draw()
+
         -- ── Lightning ──
         Lightning.draw(W, H)
 
@@ -269,6 +288,8 @@ function love.draw()
         if gameState == "playing" then
             if serverMode then
                 drawServerHint(W, H)
+            elseif demoMode then
+                drawDemoHint(W, H)
             else
                 drawControlsHint(W, H)
             end
@@ -473,6 +494,13 @@ function drawServerHint(W, H)
     love.graphics.printf(hint, 0, H - 22, W, "center")
 end
 
+function drawDemoHint(W, H)
+	love.graphics.setFont(getFont(11))
+    love.graphics.setColor(0.4, 1, 0.6, 0.35)
+    local hint = "DEMO MODE — P1: A/D move · Space jump · W cast    |    ESC menu"
+    love.graphics.printf(hint, 0, H - 22, W, "center")
+end
+
 -- ─────────────────────────────────────────────
 -- Splash Screen
 -- ─────────────────────────────────────────────
@@ -504,10 +532,10 @@ end
 function handleMenuKey(key)
     if key == "up" or key == "w" then
         menuChoice = menuChoice - 1
-        if menuChoice < 1 then menuChoice = 3 end
+        if menuChoice < 1 then menuChoice = 4 end
     elseif key == "down" or key == "s" then
         menuChoice = menuChoice + 1
-        if menuChoice > 3 then menuChoice = 1 end
+        if menuChoice > 4 then menuChoice = 1 end
     elseif key == "return" or key == "space" then
         if menuChoice == 1 then
             startAsHost()
@@ -517,6 +545,9 @@ function handleMenuKey(key)
             menuStatus = "Enter host IP address then press Enter:"
             joinAddress = ""
         elseif menuChoice == 3 then
+            -- Demo Mode
+            startDemoMode()
+        elseif menuChoice == 4 then
             -- Settings
             gameState = "settings"
         end
@@ -543,14 +574,14 @@ function drawMenu(W, H)
 	love.graphics.setFont(getFont(28))
     local menuY = 240
     local hostLabel = Config.getServerMode() and "Host Server" or "Host Game"
-    local options = {hostLabel, "Join by IP", "Settings"}
+    local options = {hostLabel, "Join by IP", "Demo Mode", "Settings"}
     for i, opt in ipairs(options) do
         if i == menuChoice then
             love.graphics.setColor(1.0, 1.0, 0.4)
-            love.graphics.printf("> " .. opt .. " <", 0, menuY + (i - 1) * 55, W, "center")
+            love.graphics.printf("> " .. opt .. " <", 0, menuY + (i - 1) * 50, W, "center")
         else
             love.graphics.setColor(0.6, 0.6, 0.6)
-            love.graphics.printf(opt, 0, menuY + (i - 1) * 55, W, "center")
+            love.graphics.printf(opt, 0, menuY + (i - 1) * 50, W, "center")
         end
     end
 
@@ -560,7 +591,7 @@ function drawMenu(W, H)
 		love.graphics.setColor(1.0, 0.45, 0.45)
 		love.graphics.printf(menuStatus, 0, H - 90, W, "center")
 	end
-	
+
 	love.graphics.setColor(0.5, 0.5, 0.5)
 	love.graphics.printf("Use ↑/↓ to select, Enter to confirm", 0, H - 60, W, "center")
 end
@@ -954,6 +985,7 @@ function processNetworkMessages()
             winner = nil
             Projectiles.clear()
             Lightning.reset()
+            Dropbox.reset()
             selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
             gameState = "selection"
 
@@ -1119,21 +1151,30 @@ function returnToMenu()
     winner = nil
     Projectiles.clear()
     Lightning.reset()
+    Dropbox.reset()
     gameState = "menu"
     menuStatus = ""
     menuChoice = 1
     joinAddress = ""
     networkSyncTimer = 0
     serverMode = false
+    demoMode = false
+    bots = {}
 end
 
 function getLocalPlayer()
     if serverMode then return nil end
+    if demoMode then return players[1] end
     local pid = Network.getLocalPlayerId()
     return players[pid]
 end
 
 function restartGame()
+    if demoMode then
+        -- Demo mode: restart with same setup
+        restartDemoMode()
+        return
+    end
     if Network.getRole() == Network.ROLE_NONE then
         -- Solo / no network: return to menu
         gameState = "menu"
@@ -1146,6 +1187,7 @@ function restartGame()
         winner = nil
         Projectiles.clear()
         Lightning.reset()
+        Dropbox.reset()
         selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
         gameState = "selection"
         -- Host tells clients to restart
@@ -1153,4 +1195,147 @@ function restartGame()
             Network.send("game_restart", {}, true)
         end
     end
+end
+
+-- ─────────────────────────────────────────────
+-- Demo Mode with Bot AI
+-- ─────────────────────────────────────────────
+
+-- Bot AI state structure
+local function createBotState(playerId)
+    return {
+        playerId = playerId,
+        jumpTimer = math.random() * 2 + 0.5,      -- time until next jump
+        castTimer = math.random() * 3 + 1,        -- time until next cast
+        moveTimer = math.random() * 1.5 + 0.5,    -- time until direction change
+        moveDir = math.random() < 0.5 and -1 or 1 -- current move direction
+    }
+end
+
+-- Update bot AI
+local function updateBotAI(bot, player, dt, allPlayers)
+    if player.life <= 0 then return end
+
+    -- Random jumping
+    bot.jumpTimer = bot.jumpTimer - dt
+    if bot.jumpTimer <= 0 then
+        player:jump()
+        bot.jumpTimer = math.random() * 2.5 + 0.8  -- 0.8-3.3 seconds between jumps
+    end
+
+    -- Random casting (at nearest enemy)
+    bot.castTimer = bot.castTimer - dt
+    if bot.castTimer <= 0 then
+        player:castAbilityAtNearest(allPlayers)
+        bot.castTimer = math.random() * 2 + 0.5  -- 0.5-2.5 seconds between casts
+    end
+
+    -- Random movement direction changes
+    bot.moveTimer = bot.moveTimer - dt
+    if bot.moveTimer <= 0 then
+        bot.moveDir = math.random() < 0.5 and -1 or 1
+        bot.moveTimer = math.random() * 2 + 0.5  -- 0.5-2.5 seconds per direction
+    end
+
+    -- Apply movement
+    player.vx = player.speed * bot.moveDir
+    player.facingRight = bot.moveDir > 0
+
+    -- Avoid walls - reverse direction if near edge
+    if player.x < 100 then
+        bot.moveDir = 1
+        player.facingRight = true
+    elseif player.x > 1180 then
+        bot.moveDir = -1
+        player.facingRight = false
+    end
+end
+
+-- Start demo mode
+function startDemoMode()
+    demoMode = true
+    maxPlayers = 3
+    serverMode = false
+
+    -- Create players: P1 is local human, P2 and P3 are bots
+    players = {}
+    players[1] = Player.new(1, Config.getControls())
+    players[2] = Player.new(2, nil)
+    players[2].isRemote = false  -- not remote, but AI controlled
+    players[3] = Player.new(3, nil)
+    players[3].isRemote = false
+
+    -- Assign random shapes to bots
+    local Shapes = require("shapes")
+    local shapeKeys = Shapes.order
+    local humanShape = shapeKeys[math.random(#shapeKeys)]
+    local bot1Shape = shapeKeys[math.random(#shapeKeys)]
+    local bot2Shape = shapeKeys[math.random(#shapeKeys)]
+
+    players[1]:setShape(humanShape)
+    players[2]:setShape(bot1Shape)
+    players[3]:setShape(bot2Shape)
+
+    -- Create bot AI states
+    bots = {
+        [2] = createBotState(2),
+        [3] = createBotState(3)
+    }
+
+    -- Spawn positions
+    Projectiles.clear()
+    local stageLeft = 250
+    local stageRight = 1030
+    local stageMiddle = (stageLeft + stageRight) / 2
+    players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
+    players[2]:spawn(stageMiddle, Physics.GROUND_Y - players[2].shapeHeight / 2)
+    players[3]:spawn(stageRight, Physics.GROUND_Y - players[3].shapeHeight / 2)
+
+    -- Start countdown
+    countdownTimer = 3.0
+    countdownValue = 3
+    gameState = "countdown"
+    Lightning.reset()
+    Dropbox.reset()
+end
+
+-- Restart demo mode
+function restartDemoMode()
+    winner = nil
+    Projectiles.clear()
+    Lightning.reset()
+    Dropbox.reset()
+    startDemoMode()
+end
+
+-- Update demo mode (called from love.update when demoMode is true)
+function updateDemoMode(dt)
+    -- Update all players
+    for _, p in ipairs(players) do
+        if p.life > 0 then
+            p:update(dt)
+        end
+    end
+
+    -- Update bot AI
+    for botId, bot in pairs(bots) do
+        if players[botId] then
+            updateBotAI(bot, players[botId], dt, players)
+        end
+    end
+
+    -- Resolve collisions
+    Physics.resolveAllCollisions(players, dt)
+
+    -- Update projectiles
+    Projectiles.update(dt, players)
+
+    -- Update lightning
+    Lightning.update(dt, players)
+
+    -- Update dropboxes
+    Dropbox.update(dt, players)
+
+    -- Check for game over
+    checkGameOver()
 end
