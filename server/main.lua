@@ -86,6 +86,7 @@ local Player      = require("player")
 local Physics     = require("physics")
 local Selection   = require("selection")
 local Projectiles = require("projectiles")
+local Abilities   = require("abilities")
 local Network     = require("network")
 local Lightning   = require("lightning")
 local Dropbox     = require("dropbox")
@@ -205,6 +206,9 @@ function love.update(dt)
         -- Update projectiles
         Projectiles.update(dt, players)
 
+        -- Update special abilities
+        Abilities.update(dt, players)
+
         -- Update lightning (host-authoritative)
         Lightning.update(dt, players)
 
@@ -292,6 +296,14 @@ processNetworkMessages = function()
                 Network.relay(data.pid, "player_cast", data, true)
             end
 
+        elseif msg.type == "player_special" then
+            local data = msg.data
+            if data and data.pid and players[data.pid] then
+                local p = players[data.pid]
+                Abilities.cast(p, p.shapeKey, p.facingRight)
+                Network.relay(data.pid, "player_special", data, true)
+            end
+
         elseif msg.type == "player_dash" then
             local data = msg.data
             if data and data.pid and players[data.pid] then
@@ -369,6 +381,7 @@ startCountdown = function()
         players[i]:setShape(choices[i])
     end
     Projectiles.clear()
+    Abilities.clear()
     Dropbox.reset()
 
     -- Spawn positions
@@ -430,6 +443,7 @@ restartGame = function()
     winner = nil
     restartTimer = nil
     Projectiles.clear()
+    Abilities.clear()
     Lightning.reset()
     Dropbox.reset()
     networkSyncTimer = 0

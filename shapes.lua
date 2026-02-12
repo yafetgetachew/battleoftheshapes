@@ -11,7 +11,7 @@ Shapes.definitions = {
         height = 48,
         life = 120,
         will = 80,
-        speed = 260,
+        speed = 325,                   -- 25% faster (was 260)
         jumpForce = -520,
         description = "Balanced fighter with solid defense.",
         draw = function(self, x, y, w, h)
@@ -28,7 +28,7 @@ Shapes.definitions = {
         height = 52,
         life = 90,
         will = 110,
-        speed = 310,
+        speed = 390,                   -- 25% faster (was 310)
         jumpForce = -560,
         description = "Fast and agile, but fragile.",
         draw = function(self, x, y, w, h)
@@ -57,7 +57,7 @@ Shapes.definitions = {
         height = 48,
         life = 100,
         will = 100,
-        speed = 280,
+        speed = 350,                   -- 25% faster (was 280)
         jumpForce = -540,
         description = "Well-rounded with balanced stats.",
         draw = function(self, x, y, w, h)
@@ -74,7 +74,7 @@ Shapes.definitions = {
         height = 40,
         life = 140,
         will = 60,
-        speed = 220,
+        speed = 275,                   -- 25% faster (was 220)
         jumpForce = -500,
         description = "Tanky and tough, but slow.",
         draw = function(self, x, y, w, h)
@@ -95,11 +95,12 @@ function Shapes.get(key)
     return Shapes.definitions[key]
 end
 
-function Shapes.drawShape(key, x, y, scale)
+function Shapes.drawShape(key, x, y, scale, scaleY)
     scale = scale or 1.0
+    scaleY = scaleY or scale  -- If scaleY not provided, use uniform scale
     local def = Shapes.definitions[key]
     if not def then return end
-    local w, h = def.width * scale, def.height * scale
+    local w, h = def.width * scale, def.height * scaleY
 	-- Preserve caller's color; individual shape draw() functions may change it.
 	local r, g, b, a = love.graphics.getColor()
 	love.graphics.setColor(def.color)

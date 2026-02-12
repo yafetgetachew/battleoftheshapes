@@ -27,13 +27,15 @@ Config.CONTROL_SCHEMES = {
         left = "a",
         right = "d",
         jump = "space",
-        cast = "w"
+        cast = "w",
+        special = "e"       -- secondary ability
     },
     arrows = {
         left = "left",
         right = "right",
         jump = "return",
-        cast = "up"
+        cast = "up",
+        special = "down"    -- secondary ability
     }
 }
 

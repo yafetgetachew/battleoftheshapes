@@ -7,6 +7,9 @@ local Sounds  = require("sounds")
 local Dropbox = require("dropbox")
 local Network = require("network")
 
+-- Knockback constant (matches Player.PROJECTILE_KNOCKBACK, duplicated to avoid circular require)
+local PROJECTILE_KNOCKBACK = 180
+
 local Projectiles = {}
 
 Projectiles.DAMAGE         = 15
@@ -61,6 +64,10 @@ function Projectiles.spawnFireball(caster, target)
     }
     table.insert(active, proj)
     Sounds.play("fireball_cast")
+    -- Apply squash/stretch to caster when shooting (stretch forward, squash vertically)
+    if caster.applySquash then
+        caster:applySquash(1.2, 0.85, 0.12)
+    end
     return true
 end
 
@@ -85,6 +92,10 @@ function Projectiles.spawnFireballDirectional(caster, facingRight)
     }
     table.insert(active, proj)
     Sounds.play("fireball_cast")
+    -- Apply squash/stretch to caster when shooting (stretch forward, squash vertically)
+    if caster.applySquash then
+        caster:applySquash(1.2, 0.85, 0.12)
+    end
     return true
 end
 
@@ -138,6 +149,15 @@ function Projectiles.update(dt, players)
 	                    player.hitFlash = 0.25   -- flash duration (visual only)
 	                    Projectiles._spawnHitEffect(p.x, p.y, p.type)
 	                    Sounds.play("fireball_hit")
+
+	                    -- Apply squash/stretch on hit (compress in hit direction)
+	                    local hitDir = (p.vx > 0) and 1 or -1
+	                    player:applySquash(0.7, 1.25, 0.15)  -- squash horizontally, stretch vertically
+
+	                    -- Apply knockback (only if authority)
+	                    if isAuthority and player.life > 0 then
+	                        player:applyKnockback(hitDir, PROJECTILE_KNOCKBACK)
+	                    end
 
 	                    -- Trigger juice callbacks
 	                    if Projectiles.onHit and actualDmg > 0 then

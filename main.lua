@@ -7,6 +7,7 @@ local Physics     = require("physics")
 local Selection   = require("selection")
 local HUD         = require("hud")
 local Projectiles = require("projectiles")
+local Abilities   = require("abilities")
 local Network     = require("network")
 local Lightning   = require("lightning")
 local Sounds      = require("sounds")
@@ -121,6 +122,34 @@ local function spawnDamageNumber(x, y, value)
         vx = (math.random() - 0.5) * 30,
         vy = -80  -- Float upward
     })
+end
+
+-- Initialize camera to correct position instantly (no interpolation)
+local function initCamera(alivePlayers)
+    local sumX, sumY = 0, 0
+    local count = 0
+    for _, p in ipairs(alivePlayers) do
+        if p.life > 0 then
+            sumX = sumX + p.x
+            sumY = sumY + p.y
+            count = count + 1
+        end
+    end
+    if count > 0 then
+        local centerX = sumX / count
+        local centerY = sumY / count
+        cameraTargetX = (centerX - GAME_WIDTH / 2) * 0.3
+        cameraTargetY = math.max(-30, math.min(30, (centerY - 400) * 0.1))
+        -- Set camera directly to target (no interpolation)
+        cameraX = cameraTargetX
+        cameraY = cameraTargetY
+    else
+        cameraX, cameraY = 0, 0
+        cameraTargetX, cameraTargetY = 0, 0
+    end
+    cameraZoom = 1.0
+    cameraTargetZoom = 1.0
+    cameraZoomTimer = 0
 end
 
 -- Update camera to follow players with lead
@@ -256,6 +285,16 @@ function love.load()
     end
     Projectiles.onKill = function(x, y)
         addHitPause(0.06)  -- Extra 60ms on kill (stacks with death explosion)
+    end
+
+    -- Set up abilities hit callbacks for juice effects
+    Abilities.onHit = function(x, y, damage)
+        spawnDamageNumber(x, y, damage)
+        addHitPause(0.04)  -- 40ms hit pause on ability hits
+        addScreenShake(4, 0.12, 40)
+    end
+    Abilities.onKill = function(x, y)
+        addHitPause(0.06)  -- Extra 60ms on kill
     end
 
     -- Set up lightning hit callbacks for juice effects
@@ -403,6 +442,9 @@ function love.update(dt)
             -- Update projectiles
             Projectiles.update(dt, players)
 
+            -- Update special abilities
+            Abilities.update(dt, players)
+
             -- Update lightning (host-authoritative)
             if Network.getRole() == Network.ROLE_HOST or Network.getRole() == Network.ROLE_NONE then
                 Lightning.update(dt, players)
@@ -464,7 +506,8 @@ function love.update(dt)
     end
 
     -- Update camera (use realDt so camera keeps moving during hit pause)
-    if gameState == "playing" or gameState == "gameover" then
+    -- Also update during countdown so camera is already positioned when game starts
+    if gameState == "countdown" or gameState == "playing" or gameState == "gameover" then
         updateCamera(realDt, players)
     end
 
@@ -549,6 +592,9 @@ function love.draw()
 
         -- ── Projectiles ──
         Projectiles.draw()
+
+        -- ── Special Abilities ──
+        Abilities.draw()
 
         -- ── Dropboxes ──
         Dropbox.draw()
@@ -691,6 +737,13 @@ function love.keypressed(key)
                     Network.send("player_cast", {pid = localPlayer.id}, true)
                 end
             end
+            if key == localPlayer.controls.special then
+                if Abilities.cast(localPlayer, localPlayer.shapeKey, localPlayer.facingRight) then
+                    if Network.getRole() ~= Network.ROLE_NONE then
+                        Network.send("player_special", {pid = localPlayer.id}, true)
+                    end
+                end
+            end
         end
     end
 
@@ -710,6 +763,7 @@ function startCountdown()
         players[i]:setShape(choices[i])
     end
     Projectiles.clear()
+    Abilities.clear()
 
     -- Spawn positions (spread evenly across the stage)
     local stageLeft = 250
@@ -727,6 +781,9 @@ function startCountdown()
     countdownTimer = 3.0
     countdownValue = 3
     gameState = "countdown"
+
+    -- Initialize camera to correct position immediately (prevents "floating" illusion)
+    initCamera(players)
 
     if Network.getRole() == Network.ROLE_HOST then
         local data = {}
@@ -788,7 +845,7 @@ function drawControlsHint(W, H)
 	love.graphics.setFont(getFont(11))
     love.graphics.setColor(1, 1, 1, 0.25)
     local pid = Network.getLocalPlayerId()
-    local hint = "P" .. pid .. ": A/D move (double-tap dash) · Space jump · W cast    |    ESC menu"
+    local hint = "P" .. pid .. ": A/D move (double-tap dash) · Space jump · W cast · E special    |    ESC menu"
     love.graphics.printf(hint, 0, H - 22, W, "center")
 end
 
@@ -803,7 +860,7 @@ end
 function drawDemoHint(W, H)
 	love.graphics.setFont(getFont(11))
     love.graphics.setColor(0.4, 1, 0.6, 0.35)
-    local hint = "DEMO MODE — P1: A/D move (double-tap dash) · Space jump · W cast    |    ESC menu"
+    local hint = "DEMO MODE — P1: A/D move (double-tap dash) · Space jump · W cast · E special    |    ESC menu"
     love.graphics.printf(hint, 0, H - 22, W, "center")
 end
 
@@ -1034,7 +1091,7 @@ function drawSettings(W, H)
     -- Left column
     drawCell(1, 1, "Controls",
         scheme == "wasd" and "WASD" or "Arrows", nil,
-        scheme == "wasd" and "A/D move • Space jump • W cast" or "←/→ move • Enter jump • ↑ cast")
+        scheme == "wasd" and "A/D move • Space jump • W cast • E special" or "←/→ move • Enter jump • ↑ cast • ↓ special")
     drawCell(1, 2, "Players",
         pc .. " Players", pc == 3,
         pc == 2 and "1v1 duel" or "Free-for-all")
@@ -1318,6 +1375,7 @@ function processNetworkMessages()
                     players[i]:setShape(data["s" .. i])
                 end
                 Projectiles.clear()
+                Abilities.clear()
                 local stageLeft = 250
                 local stageRight = 1030
                 if maxPlayers == 2 then
@@ -1332,6 +1390,8 @@ function processNetworkMessages()
                 countdownTimer = 3.0
                 countdownValue = 3
                 gameState = "countdown"
+                -- Initialize camera to correct position immediately
+                initCamera(players)
             end
 
         elseif msg.type == "game_state" then
@@ -1376,6 +1436,17 @@ function processNetworkMessages()
                 end
             end
 
+        elseif msg.type == "player_special" then
+            -- Remote player used special ability
+            local data = msg.data
+            if data and data.pid and players[data.pid] then
+                local p = players[data.pid]
+                Abilities.cast(p, p.shapeKey, p.facingRight)
+                if Network.getRole() == Network.ROLE_HOST then
+                    Network.relay(data.pid, "player_special", data, true)
+                end
+            end
+
         elseif msg.type == "player_dash" then
             -- Remote player dashed
             local data = msg.data
@@ -1400,6 +1471,7 @@ function processNetworkMessages()
             -- Host told us to restart - go back to selection
             winner = nil
             Projectiles.clear()
+            Abilities.clear()
             Lightning.reset()
             Dropbox.reset()
             selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
@@ -1655,6 +1727,7 @@ function returnToMenu()
     selection = nil
     winner = nil
     Projectiles.clear()
+    Abilities.clear()
     Lightning.reset()
     Dropbox.reset()
     gameState = "menu"
@@ -1693,6 +1766,7 @@ function restartGame()
         -- Networked: stay connected, go back to selection
         winner = nil
         Projectiles.clear()
+        Abilities.clear()
         Lightning.reset()
         Dropbox.reset()
         selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
@@ -1794,6 +1868,7 @@ function startDemoMode()
 
     -- Spawn positions
     Projectiles.clear()
+    Abilities.clear()
     local stageLeft = 250
     local stageRight = 1030
     local stageMiddle = (stageLeft + stageRight) / 2
@@ -1807,12 +1882,16 @@ function startDemoMode()
     gameState = "countdown"
     Lightning.reset()
     Dropbox.reset()
+
+    -- Initialize camera to correct position immediately
+    initCamera(players)
 end
 
 -- Restart demo mode
 function restartDemoMode()
     winner = nil
     Projectiles.clear()
+    Abilities.clear()
     Lightning.reset()
     Dropbox.reset()
     startDemoMode()
@@ -1852,6 +1931,9 @@ function updateDemoMode(dt)
 
     -- Update projectiles
     Projectiles.update(dt, players)
+
+    -- Update special abilities
+    Abilities.update(dt, players)
 
     -- Update lightning
     Lightning.update(dt, players)

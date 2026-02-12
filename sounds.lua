@@ -232,8 +232,64 @@ function Sounds.load()
     end)
     sfx.menu_select:setVolume(0.35)
 
+    -- ═══════════════════════════════════════════════
+    -- Shape-specific ability sounds (loaded from files)
+    -- ═══════════════════════════════════════════════
+
+    -- Square: Laser fire
+    if love.filesystem.getInfo("assets/sounds/lazer.mp3") then
+        sfx.laser_fire = love.audio.newSource("assets/sounds/lazer.mp3", "static")
+        sfx.laser_fire:setVolume(0.5)
+    end
+
+    -- Triangle: Spike/Arrow fire
+    if love.filesystem.getInfo("assets/sounds/arrows.mp3") then
+        sfx.spike_fire = love.audio.newSource("assets/sounds/arrows.mp3", "static")
+        sfx.spike_fire:setVolume(0.5)
+    end
+
+    -- Triangle: Spike hit - sharp impact (procedural fallback)
+    sfx.spike_hit = generateSound(0.15, sr, function(t, dur)
+        local env = (1 - t / dur)
+        env = env * env * env
+        local freq = 200 - t * 150
+        local tone = math.sin(2 * math.pi * freq * t) * 0.5
+        local click = t < 0.008 and (1 - t / 0.008) * 0.7 or 0
+        return (tone + click) * env
+    end)
+    sfx.spike_hit:setVolume(0.4)
+
+    -- Rectangle: Block spawn/slam
+    if love.filesystem.getInfo("assets/sounds/rectangle-slam.mp3") then
+        sfx.block_spawn = love.audio.newSource("assets/sounds/rectangle-slam.mp3", "static")
+        sfx.block_spawn:setVolume(0.5)
+        -- Also use for hit and land
+        sfx.block_hit = love.audio.newSource("assets/sounds/rectangle-slam.mp3", "static")
+        sfx.block_hit:setVolume(0.55)
+        sfx.block_land = love.audio.newSource("assets/sounds/rectangle-slam.mp3", "static")
+        sfx.block_land:setVolume(0.45)
+    end
+
+    -- Circle: Boulder roll
+    if love.filesystem.getInfo("assets/sounds/rock-roll.mp3") then
+        sfx.boulder_roll = love.audio.newSource("assets/sounds/rock-roll.mp3", "static")
+        sfx.boulder_roll:setVolume(0.5)
+    end
+
+    -- Circle: Boulder hit - heavy impact (procedural fallback)
+    sfx.boulder_hit = generateSound(0.35, sr, function(t, dur)
+        local env = (1 - t / dur)
+        env = env * env
+        local freq = 70 - t * 50
+        local tone = math.sin(2 * math.pi * freq * t) * 0.6
+        local noise = (math.random() * 2 - 1) * 0.35 * env
+        local crack = t < 0.025 and (1 - t / 0.025) * 0.7 or 0
+        return (tone + noise + crack) * env
+    end)
+    sfx.boulder_hit:setVolume(0.5)
+
     -- Load gameplay background music tracks (but don't auto-play)
-    local bgFiles = {"background.mp3", "background2.mp3"}
+    local bgFiles = {"assets/sounds/background.mp3", "assets/sounds/background2.mp3"}
     for _, filename in ipairs(bgFiles) do
         if love.filesystem.getInfo(filename) then
             local track = love.audio.newSource(filename, "stream")
@@ -244,8 +300,8 @@ function Sounds.load()
     end
 
     -- Load menu music
-    if love.filesystem.getInfo("menu.mp3") then
-        menuMusic = love.audio.newSource("menu.mp3", "stream")
+    if love.filesystem.getInfo("assets/sounds/menu.mp3") then
+        menuMusic = love.audio.newSource("assets/sounds/menu.mp3", "stream")
         menuMusic:setLooping(true)
         menuMusic:setVolume(0.35)
     end

@@ -6,9 +6,9 @@ local Network = require("network")
 
 local Physics = {}
 
-Physics.GRAVITY       = 1200      -- pixels/s²
+Physics.GRAVITY       = 2200      -- pixels/s² (increased for snappier jumps)
 Physics.GROUND_Y      = 620       -- y-coordinate of the ground surface
-Physics.FRICTION      = 0.88      -- horizontal velocity damping each frame
+Physics.FRICTION      = 0.85      -- horizontal velocity damping each frame (slightly more friction)
 Physics.BOUNCE        = 0.0       -- bounce factor on ground hit
 Physics.WALL_LEFT     = 0
 Physics.WALL_RIGHT    = 1280

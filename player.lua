@@ -25,6 +25,7 @@ Player.DOUBLE_TAP_WINDOW = 0.25 -- max time between taps to trigger dash (second
 Player.DASH_SELF_DAMAGE = 10    -- damage to the dasher on collision
 Player.DASH_TARGET_DAMAGE = 20  -- damage to the target on collision
 Player.DASH_KNOCKBACK = 500     -- knockback velocity applied to target
+Player.PROJECTILE_KNOCKBACK = 180  -- knockback velocity when hit by projectile
 
 function Player.new(id, controls)
     local self = setmetatable({}, Player)
@@ -41,8 +42,8 @@ function Player.new(id, controls)
     self.maxLife      = 100
     self.will        = 100
     self.maxWill      = 100
-    self.speed       = 280
-    self.jumpForce   = -540
+    self.speed       = 425              -- 25% faster (was 340)
+    self.jumpForce   = -750             -- increased proportionally with gravity for snappier jumps
     self.shapeWidth  = 48
     self.shapeHeight = 48
     self.facingRight = (id == 1)
@@ -69,6 +70,11 @@ function Player.new(id, controls)
     self._prevLife       = 100         -- previous frame's life for death detection
     self._justDied       = false       -- true for one frame when player dies
     self._deathTime      = 0           -- time since death (for explosion animation)
+    -- Squash/stretch animation
+    self._squashX        = 1.0         -- horizontal scale (1.0 = normal)
+    self._squashY        = 1.0         -- vertical scale (1.0 = normal)
+    self._squashTimer    = 0           -- time remaining for squash effect
+    self._squashDuration = 0           -- total duration of current squash
     return self
 end
 
@@ -91,6 +97,7 @@ function Player:spawn(x, y)
     self.y  = y
     self.vx = 0
     self.vy = 0
+    self.onGround = true  -- Set initial ground state to prevent floating on first frame
 end
 
 function Player:handleInput(dt)
@@ -199,6 +206,10 @@ function Player:update(dt)
         if self.hitFlash > 0 then
             self.hitFlash = self.hitFlash - dt
         end
+        -- Tick squash/stretch for remote players (visual only)
+        if self._squashTimer > 0 then
+            self._squashTimer = self._squashTimer - dt
+        end
         -- Will regen so host has accurate will values to broadcast
         if self.will < self.maxWill then
             self.will = math.min(self.maxWill, self.will + Player.WILL_REGEN * dt)
@@ -261,6 +272,11 @@ function Player:update(dt)
         self.hitFlash = self.hitFlash - dt
     end
 
+    -- Tick down squash/stretch animation
+    if self._squashTimer > 0 then
+        self._squashTimer = self._squashTimer - dt
+    end
+
     -- Track idle time for breathing animation
     local isMoving = math.abs(self.vx) > 10 or not self.onGround
     if isMoving then
@@ -311,6 +327,38 @@ function Player:checkDeath(dt)
     end
 end
 
+-- Apply squash/stretch effect (scaleX, scaleY, duration)
+-- scaleX < 1 = squash horizontally, scaleY > 1 = stretch vertically
+function Player:applySquash(scaleX, scaleY, duration)
+    self._squashX = scaleX
+    self._squashY = scaleY
+    self._squashTimer = duration
+    self._squashDuration = duration
+end
+
+-- Get current squash/stretch scale (returns scaleX, scaleY)
+function Player:getSquashScale()
+    if self._squashTimer <= 0 then
+        return 1.0, 1.0
+    end
+    -- Ease back to 1.0 over time
+    local t = self._squashTimer / self._squashDuration
+    local easeT = t * t  -- Quadratic ease-out (fast start, slow end)
+    local sx = 1.0 + (self._squashX - 1.0) * easeT
+    local sy = 1.0 + (self._squashY - 1.0) * easeT
+    return sx, sy
+end
+
+-- Apply knockback from a hit (direction: 1 = right, -1 = left)
+function Player:applyKnockback(direction, force)
+    force = force or Player.PROJECTILE_KNOCKBACK
+    self.vx = self.vx + direction * force
+    -- Small upward pop
+    if self.onGround then
+        self.vy = -80
+    end
+end
+
 -- Apply state received from network
 function Player:applyNetState(state)
 	-- NOTE: network fields may legitimately be 0 or false; only treat missing fields as nil.
@@ -318,7 +366,14 @@ function Player:applyNetState(state)
     if state.y ~= nil then self.y = state.y end
     if state.vx ~= nil then self.vx = state.vx end
     if state.vy ~= nil then self.vy = state.vy end
-    if state.life ~= nil then self.life = state.life end
+    if state.life ~= nil then
+        -- Detect damage taken and trigger visual effects
+        if state.life < self.life and self.life > 0 then
+            self.hitFlash = 0.25  -- flash when damaged
+            self:applySquash(0.7, 1.25, 0.15)  -- squash effect
+        end
+        self.life = state.life
+    end
     if state.will ~= nil then self.will = state.will end
     if state.facingRight ~= nil then self.facingRight = state.facingRight end
     if state.armor ~= nil then self.armor = state.armor end
@@ -420,9 +475,12 @@ function Player:draw(isGameOver)
         end
     end
 
-    -- ── Shape with idle breathing ──
+    -- ── Shape with idle breathing + squash/stretch ──
     local breathScale = self:getBreathingScale()
-    Shapes.drawShape(self.shapeKey, self.x, self.y, breathScale)
+    local squashX, squashY = self:getSquashScale()
+    local finalScaleX = breathScale * squashX
+    local finalScaleY = breathScale * squashY
+    Shapes.drawShape(self.shapeKey, self.x, self.y, finalScaleX, finalScaleY)
 
     -- Hit flash overlay (white flash when damaged)
     if self.hitFlash > 0 then
