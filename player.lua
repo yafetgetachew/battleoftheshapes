@@ -9,6 +9,20 @@ local Config      = require("config")
 local Player = {}
 Player.__index = Player
 
+-- Font cache for name rendering
+local FONT_PATH = "assets/fonts/FredokaOne-Regular.ttf"
+local _nameFont = nil
+local function getNameFont()
+    if not _nameFont then
+        _nameFont = love.graphics.newFont(FONT_PATH, 14)
+    end
+    return _nameFont
+end
+
+-- Callback for damage visualization (set by main.lua)
+-- function(x, y, damage) called when player receives damage via network sync
+Player.onDamageReceived = nil
+
 -- Shape → ability type mapping (all shapes use fireball)
 Player.ABILITY_MAP = {
     triangle  = "fireball",
@@ -25,15 +39,19 @@ Player.DOUBLE_TAP_WINDOW = 0.25 -- max time between taps to trigger dash (second
 Player.DASH_SELF_DAMAGE = 10    -- damage to the dasher on collision
 Player.DASH_TARGET_DAMAGE = 20  -- damage to the target on collision
 Player.DASH_KNOCKBACK = 500     -- knockback velocity applied to target
+Player.PROJECTILE_KNOCKBACK = 180  -- knockback velocity when hit by projectile
 
 function Player.new(id, controls)
     local self = setmetatable({}, Player)
-    self.id          = id               -- 1, 2, or 3
+    self.id          = id               -- 1, 2, ... up to 12
     self.controls    = controls         -- {left=key, right=key, jump=key, cast=key} or nil for remote
     self.isRemote    = false            -- true for network-controlled players
+    self.name        = "Player " .. id  -- display name (can be set via network or config)
     self.shapeKey    = nil              -- set after selection
     self.x           = 0
     self.y           = 0
+    self.aimX        = 0                -- Aim target X (world coords)
+    self.aimY        = 0                -- Aim target Y (world coords)
     self.vx          = 0
     self.vy          = 0
     self.onGround    = false
@@ -41,8 +59,11 @@ function Player.new(id, controls)
     self.maxLife      = 100
     self.will        = 100
     self.maxWill      = 100
-    self.speed       = 280
-    self.jumpForce   = -540
+    self.speed       = 425              -- 25% faster (was 340)
+    self.jumpForce   = -750             -- increased proportionally with gravity for snappier jumps
+    self.jumpForce2  = -950             -- higher second jump
+    self.jumpCount   = 0                -- current number of jumps performed
+    self.maxJumps    = 2                -- maximum number of jumps allowed (double jump)
     self.shapeWidth  = 48
     self.shapeHeight = 48
     self.facingRight = (id == 1)
@@ -69,6 +90,11 @@ function Player.new(id, controls)
     self._prevLife       = 100         -- previous frame's life for death detection
     self._justDied       = false       -- true for one frame when player dies
     self._deathTime      = 0           -- time since death (for explosion animation)
+    -- Squash/stretch animation
+    self._squashX        = 1.0         -- horizontal scale (1.0 = normal)
+    self._squashY        = 1.0         -- vertical scale (1.0 = normal)
+    self._squashTimer    = 0           -- time remaining for squash effect
+    self._squashDuration = 0           -- total duration of current squash
     return self
 end
 
@@ -91,6 +117,7 @@ function Player:spawn(x, y)
     self.y  = y
     self.vx = 0
     self.vy = 0
+    self.onGround = true  -- Set initial ground state to prevent floating on first frame
 end
 
 function Player:handleInput(dt)
@@ -115,9 +142,23 @@ function Player:handleInput(dt)
 end
 
 function Player:jump()
-    if self.onGround then
-        self.vy = self.jumpForce
+    if self.jumpCount < self.maxJumps then
+        if self.jumpCount == 0 then
+            self.vy = self.jumpForce
+        else
+            self.vy = self.jumpForce2
+        end
         self.onGround = false
+        self.jumpCount = self.jumpCount + 1
+        return true
+    end
+    return false
+end
+
+-- Stop jump (variable jump height)
+function Player:stopJump()
+    if self.vy < 0 and not self.isDashing then
+        self.vy = self.vy * 0.5
     end
 end
 
@@ -193,11 +234,24 @@ function Player:castAbilityAtNearest(allPlayers)
     end
 end
 
+-- Cast ability towards a specific point (x, y)
+function Player:castAbilityAt(tx, ty)
+    if self.will < Projectiles.WILL_COST then return false end
+    if not Player.ABILITY_MAP[self.shapeKey] then return false end
+
+    -- Only primary fire (fireball) supports aiming for now
+    return Projectiles.spawnFireballAt(self, tx, ty)
+end
+
 function Player:update(dt)
     if self.isRemote then
         -- Remote players: position comes from network, only update cosmetics + will regen
         if self.hitFlash > 0 then
             self.hitFlash = self.hitFlash - dt
+        end
+        -- Tick squash/stretch for remote players (visual only)
+        if self._squashTimer > 0 then
+            self._squashTimer = self._squashTimer - dt
         end
         -- Will regen so host has accurate will values to broadcast
         if self.will < self.maxWill then
@@ -229,6 +283,7 @@ function Player:update(dt)
     self._justLanded = false
     if self.onGround and not wasOnGround then
         self._justLanded = true
+        self.jumpCount = 0  -- Reset jump count on landing
     end
     self._wasOnGround = self.onGround
 
@@ -259,6 +314,11 @@ function Player:update(dt)
     -- Tick down hit flash
     if self.hitFlash > 0 then
         self.hitFlash = self.hitFlash - dt
+    end
+
+    -- Tick down squash/stretch animation
+    if self._squashTimer > 0 then
+        self._squashTimer = self._squashTimer - dt
     end
 
     -- Track idle time for breathing animation
@@ -311,6 +371,38 @@ function Player:checkDeath(dt)
     end
 end
 
+-- Apply squash/stretch effect (scaleX, scaleY, duration)
+-- scaleX < 1 = squash horizontally, scaleY > 1 = stretch vertically
+function Player:applySquash(scaleX, scaleY, duration)
+    self._squashX = scaleX
+    self._squashY = scaleY
+    self._squashTimer = duration
+    self._squashDuration = duration
+end
+
+-- Get current squash/stretch scale (returns scaleX, scaleY)
+function Player:getSquashScale()
+    if self._squashTimer <= 0 then
+        return 1.0, 1.0
+    end
+    -- Ease back to 1.0 over time
+    local t = self._squashTimer / self._squashDuration
+    local easeT = t * t  -- Quadratic ease-out (fast start, slow end)
+    local sx = 1.0 + (self._squashX - 1.0) * easeT
+    local sy = 1.0 + (self._squashY - 1.0) * easeT
+    return sx, sy
+end
+
+-- Apply knockback from a hit (direction: 1 = right, -1 = left)
+function Player:applyKnockback(direction, force)
+    force = force or Player.PROJECTILE_KNOCKBACK
+    self.vx = self.vx + direction * force
+    -- Small upward pop
+    if self.onGround then
+        self.vy = -80
+    end
+end
+
 -- Apply state received from network
 function Player:applyNetState(state)
 	-- NOTE: network fields may legitimately be 0 or false; only treat missing fields as nil.
@@ -318,13 +410,30 @@ function Player:applyNetState(state)
     if state.y ~= nil then self.y = state.y end
     if state.vx ~= nil then self.vx = state.vx end
     if state.vy ~= nil then self.vy = state.vy end
-    if state.life ~= nil then self.life = state.life end
+    if state.life ~= nil then
+        -- Detect damage taken and trigger visual effects
+        if state.life < self.life and self.life > 0 then
+            local dmgTaken = self.life - state.life
+            self.hitFlash = 0.25  -- flash when damaged
+            self:applySquash(0.7, 1.25, 0.15)  -- squash effect
+            -- Fire damage callback for damage numbers
+            if Player.onDamageReceived then
+                Player.onDamageReceived(self.x, self.y, dmgTaken)
+            end
+        end
+        self.life = state.life
+    end
     if state.will ~= nil then self.will = state.will end
+    if state.aimX ~= nil then self.aimX = state.aimX end
+    if state.aimY ~= nil then self.aimY = state.aimY end
     if state.facingRight ~= nil then self.facingRight = state.facingRight end
     if state.armor ~= nil then self.armor = state.armor end
     if state.damageBoost ~= nil then self.damageBoost = state.damageBoost end
     if state.damageBoostShots ~= nil then self.damageBoostShots = state.damageBoostShots end
     if state.isDashing ~= nil then
+        if state.isDashing and not self.isDashing then
+            self.dashImpactPlayed = false
+        end
         self.isDashing = state.isDashing
         if state.isDashing then
             self.dashTimer = Player.DASH_DURATION
@@ -343,6 +452,8 @@ function Player:getNetState()
         vy = math.floor(self.vy),
         life = math.floor(self.life),
         will = math.floor(self.will * 10) / 10,
+        aimX = math.floor(self.aimX),
+        aimY = math.floor(self.aimY),
         facingRight = self.facingRight,
         armor = self.armor,
         damageBoost = self.damageBoost,
@@ -420,9 +531,12 @@ function Player:draw(isGameOver)
         end
     end
 
-    -- ── Shape with idle breathing ──
+    -- ── Shape with idle breathing + squash/stretch ──
     local breathScale = self:getBreathingScale()
-    Shapes.drawShape(self.shapeKey, self.x, self.y, breathScale)
+    local squashX, squashY = self:getSquashScale()
+    local finalScaleX = breathScale * squashX
+    local finalScaleY = breathScale * squashY
+    Shapes.drawShape(self.shapeKey, self.x, self.y, finalScaleX, finalScaleY)
 
     -- Hit flash overlay (white flash when damaged)
     if self.hitFlash > 0 then
@@ -442,6 +556,24 @@ function Player:draw(isGameOver)
                 love.graphics.rectangle("fill", self.x - w/2, self.y - h/2, w, h)
             end
         end
+    end
+
+    -- Draw player name above the shape
+    if self.name and #self.name > 0 then
+        local nameFont = getNameFont()
+        love.graphics.setFont(nameFont)
+        local nameY = self.y - self.shapeHeight / 2 - 20
+        -- Background shadow for readability
+        love.graphics.setColor(0, 0, 0, 0.5)
+        love.graphics.printf(self.name, self.x - 100 + 1, nameY + 1, 200, "center")
+        -- Name text (white with slight tint based on player ID)
+        local r, g, b = 1, 1, 1
+        if self.id == 1 then r, g, b = 1, 0.9, 0.8
+        elseif self.id == 2 then r, g, b = 0.8, 0.9, 1
+        elseif self.id == 3 then r, g, b = 0.9, 1, 0.8
+        end
+        love.graphics.setColor(r, g, b, 0.9)
+        love.graphics.printf(self.name, self.x - 100, nameY, 200, "center")
     end
 
     -- Draw a small directional indicator (arrow under the shape)

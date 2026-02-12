@@ -7,12 +7,19 @@ local Sounds  = require("sounds")
 local Dropbox = require("dropbox")
 local Network = require("network")
 
+-- Knockback constant (matches Player.PROJECTILE_KNOCKBACK, duplicated to avoid circular require)
+local PROJECTILE_KNOCKBACK = 180
+
 local Projectiles = {}
 
-Projectiles.DAMAGE         = 15
+Projectiles.DAMAGE         = 10
 Projectiles.WILL_COST      = 10
 Projectiles.FIREBALL_SPEED = 600     -- px/s horizontal
 Projectiles.FIREBALL_RADIUS = 12
+
+-- Callbacks for juice effects (set by main.lua)
+Projectiles.onHit = nil         -- function(x, y, damage) called when fireball hits
+Projectiles.onKill = nil        -- function(x, y) called when a hit results in death
 
 -- Active projectile list and hit-effect list
 local active = {}
@@ -57,6 +64,10 @@ function Projectiles.spawnFireball(caster, target)
     }
     table.insert(active, proj)
     Sounds.play("fireball_cast")
+    -- Apply squash/stretch to caster when shooting (stretch forward, squash vertically)
+    if caster.applySquash then
+        caster:applySquash(1.2, 0.85, 0.12)
+    end
     return true
 end
 
@@ -81,6 +92,50 @@ function Projectiles.spawnFireballDirectional(caster, facingRight)
     }
     table.insert(active, proj)
     Sounds.play("fireball_cast")
+    -- Apply squash/stretch to caster when shooting (stretch forward, squash vertically)
+    if caster.applySquash then
+        caster:applySquash(1.2, 0.85, 0.12)
+    end
+    return true
+end
+
+-- Spawn a fireball towards a specific point (manual aim)
+function Projectiles.spawnFireballAt(caster, tx, ty)
+    if caster.will < Projectiles.WILL_COST then return false end
+    caster.will = caster.will - Projectiles.WILL_COST
+
+    local dx = tx - caster.x
+    local dy = ty - caster.y
+    local len = math.sqrt(dx*dx + dy*dy)
+    if len == 0 then dx, dy, len = 1, 0, 1 end -- Default to right if 0 distance
+
+    -- Normalize
+    local ndx, ndy = dx / len, dy / len
+
+    local dmg = _consumeBoost(caster)
+    local proj = {
+        type     = "fireball",
+        owner    = caster.id,
+        targetId = nil,
+        damage   = dmg,
+        x        = caster.x + ndx * (caster.shapeWidth / 2 + 10),
+        y        = caster.y + ndy * (caster.shapeWidth / 2 + 10),
+        vx       = Projectiles.FIREBALL_SPEED * ndx,
+        vy       = Projectiles.FIREBALL_SPEED * ndy,
+        radius   = Projectiles.FIREBALL_RADIUS,
+        age      = 0,
+        particles = {}
+    }
+    table.insert(active, proj)
+    Sounds.play("fireball_cast")
+    
+    -- Update facing direction based on aim
+    caster.facingRight = (ndx > 0)
+
+    -- Apply squash/stretch to caster (stretch in shoot direction)
+    if caster.applySquash then
+        caster:applySquash(1.2, 0.85, 0.12)
+    end
     return true
 end
 
@@ -115,9 +170,12 @@ function Projectiles.update(dt, players)
 	            -- Ignore dead players so projectiles don't fizzle on corpses / disconnected slots
 	            if player.id ~= p.owner and (player.life or 0) > 0 then
 	                if Projectiles._hitTest(p, player) then
+	                    local prevLife = player.life
+	                    local actualDmg = 0
 	                    -- Only apply damage if we're the authority (host/solo/demo)
 	                    if isAuthority and not player.invulnerable then
 	                        local dmg = p.damage or Projectiles.DAMAGE
+	                        actualDmg = dmg
 	                        -- Armor absorbs damage first, then vanishes
 	                        if player.armor and player.armor > 0 then
 	                            local absorbed = math.min(player.armor, dmg)
@@ -126,10 +184,29 @@ function Projectiles.update(dt, players)
 	                            if player.armor <= 0 then player.armor = 0 end
 	                        end
 	                        player.life = math.max(0, player.life - dmg)
+	                        actualDmg = prevLife - player.life
 	                    end
 	                    player.hitFlash = 0.25   -- flash duration (visual only)
 	                    Projectiles._spawnHitEffect(p.x, p.y, p.type)
 	                    Sounds.play("fireball_hit")
+
+	                    -- Apply squash/stretch on hit (compress in hit direction)
+	                    local hitDir = (p.vx > 0) and 1 or -1
+	                    player:applySquash(0.7, 1.25, 0.15)  -- squash horizontally, stretch vertically
+
+	                    -- Apply knockback (only if authority)
+	                    if isAuthority and player.life > 0 then
+	                        player:applyKnockback(hitDir, PROJECTILE_KNOCKBACK)
+	                    end
+
+	                    -- Trigger juice callbacks
+	                    if Projectiles.onHit and actualDmg > 0 then
+	                        Projectiles.onHit(player.x, player.y, actualDmg)
+	                    end
+	                    if Projectiles.onKill and prevLife > 0 and player.life <= 0 then
+	                        Projectiles.onKill(player.x, player.y)
+	                    end
+
 	                    hit = true
 	                    break
 	                end
@@ -265,18 +342,15 @@ function Projectiles._drawFireball(p)
 end
 
 function Projectiles._hitTest(proj, player)
-    -- Circle vs AABB
-    local cx, cy, r = proj.x, proj.y, proj.radius
-    local px = player.x - player.shapeWidth / 2
-    local py = player.y - player.shapeHeight / 2
-    local pw = player.shapeWidth
-    local ph = player.shapeHeight
-
-    local closestX = math.max(px, math.min(cx, px + pw))
-    local closestY = math.max(py, math.min(cy, py + ph))
-    local dx = cx - closestX
-    local dy = cy - closestY
-    return (dx * dx + dy * dy) <= (r * r)
+    -- Use a generous circle collision for better "feel"
+    -- Treat player as a circle with radius = half of their largest dimension
+    -- This fixes issues where projectiles seem to pass through or just miss shapes like the Rectangle
+    local pRadius = math.max(player.shapeWidth, player.shapeHeight) / 2
+    local combinedRadius = proj.radius + pRadius
+    
+    local dx = proj.x - player.x
+    local dy = proj.y - player.y
+    return (dx * dx + dy * dy) < (combinedRadius * combinedRadius)
 end
 
 function Projectiles._isOffScreen(p)

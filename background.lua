@@ -1,5 +1,6 @@
 -- background.lua
 -- Parallax background system with moon, stars, mountains, and clouds
+-- Plus ambient particles, reactive effects, and foreground silhouettes
 
 local Physics = require("physics")
 
@@ -22,6 +23,10 @@ local COLORS = {
     mountainNear = {0.05, 0.04, 0.10}, -- Darkest silhouette (closest)
     cloudFar = {0.4, 0.45, 0.55, 0.15},
     cloudNear = {0.35, 0.40, 0.50, 0.25},
+    dustMote = {0.9, 0.85, 0.7, 0.3},
+    fallingStar = {1, 1, 0.9},
+    fog = {0.3, 0.35, 0.45, 0.12},
+    foreground = {0.02, 0.02, 0.05},   -- Very dark silhouette
 }
 
 -- Background elements
@@ -30,6 +35,19 @@ local mountains = {}  -- 3 layers of mountain silhouettes
 local clouds = {}     -- 2 layers of clouds
 local moonX, moonY = 200, 100
 local moonRadius = 55
+
+-- Ambient particles
+local dustMotes = {}
+local fallingStars = {}
+local fogLayers = {}
+
+-- Foreground silhouettes
+local foregroundElements = {}
+
+-- Reactive state
+local lightningFlashTimer = 0    -- Brightens clouds on lightning
+local moonPulseTimer = 0         -- Moon glow pulse on match start
+local moonPulseIntensity = 0
 
 -- Parallax factors (lower = moves slower = feels further)
 local PARALLAX = {
@@ -40,6 +58,7 @@ local PARALLAX = {
     mountainNear = 0.18,
     cloudFar = 0.08,
     cloudNear = 0.15,
+    foreground = 0.35,  -- Foreground moves faster (closer)
 }
 
 -- Cloud drift speeds
@@ -163,9 +182,92 @@ local function drawCloud(cloud, cloudX, color)
     end
 end
 
+-- Generate a dust mote particle
+local function generateDustMote()
+    return {
+        x = math.random() * GAME_WIDTH,
+        y = math.random() * (GROUND_Y - 100) + 50,
+        size = math.random() * 2 + 1,
+        alpha = math.random() * 0.2 + 0.1,
+        driftX = (math.random() - 0.5) * 15,  -- Slow horizontal drift
+        driftY = (math.random() - 0.5) * 8,   -- Slow vertical drift
+        wobblePhase = math.random() * math.pi * 2,
+        wobbleSpeed = math.random() * 1.5 + 0.5,
+    }
+end
+
+-- Generate a foreground silhouette element
+local function generateForegroundElement(side)
+    local element = {
+        side = side,  -- "left" or "right"
+        type = math.random(1, 3),  -- 1=tree branch, 2=dead tree, 3=ruin pillar
+        x = side == "left" and -50 or GAME_WIDTH + 50,
+        baseY = GROUND_Y,
+    }
+    return element
+end
+
+-- Draw a foreground silhouette
+local function drawForegroundElement(elem, offsetX)
+    local x = elem.x - offsetX * PARALLAX.foreground
+    local y = elem.baseY
+
+    love.graphics.setColor(COLORS.foreground)
+
+    if elem.type == 1 then
+        -- Tree with trunk and branches reaching in from side
+        local dir = elem.side == "left" and 1 or -1
+        -- Trunk (grounded)
+        love.graphics.polygon("fill",
+            x, y,                       -- Ground left
+            x + dir * 20, y,            -- Ground right
+            x + dir * 18, y - 200,      -- Top right
+            x + dir * 5, y - 200        -- Top left
+        )
+        love.graphics.setLineWidth(5)
+        -- Main branch reaching inward
+        love.graphics.line(x + dir * 12, y - 180, x + dir * 80, y - 250)
+        love.graphics.line(x + dir * 80, y - 250, x + dir * 140, y - 230)
+        -- Sub-branches
+        love.graphics.setLineWidth(3)
+        love.graphics.line(x + dir * 50, y - 220, x + dir * 90, y - 290)
+        love.graphics.line(x + dir * 100, y - 240, x + dir * 130, y - 270)
+        love.graphics.setLineWidth(2)
+        love.graphics.line(x + dir * 120, y - 235, x + dir * 160, y - 210)
+    elseif elem.type == 2 then
+        -- Dead tree silhouette
+        local dir = elem.side == "left" and 1 or -1
+        -- Trunk
+        love.graphics.polygon("fill",
+            x, y,
+            x + dir * 15, y,
+            x + dir * 12, y - 180,
+            x + dir * 3, y - 180
+        )
+        -- Branches
+        love.graphics.setLineWidth(3)
+        love.graphics.line(x + dir * 8, y - 140, x + dir * 50, y - 200)
+        love.graphics.line(x + dir * 10, y - 100, x + dir * 60, y - 130)
+        love.graphics.setLineWidth(2)
+        love.graphics.line(x + dir * 40, y - 190, x + dir * 70, y - 220)
+    else
+        -- Ruined pillar/column
+        local dir = elem.side == "left" and 1 or -1
+        love.graphics.polygon("fill",
+            x, y,
+            x + dir * 25, y,
+            x + dir * 22, y - 120,
+            x + dir * 28, y - 130,
+            x + dir * 18, y - 140,
+            x + dir * 8, y - 135,
+            x + dir * 3, y - 120
+        )
+    end
+end
+
 function Background.init()
     math.randomseed(os.time())
-    
+
     -- Generate stars (more than before, with varying sizes)
     for i = 1, 120 do
         stars[i] = {
@@ -177,14 +279,14 @@ function Background.init()
             twinklePhase = math.random() * math.pi * 2,
         }
     end
-    
+
     -- Generate 3 mountain layers (far to near)
     mountains = {
         generateMountainLayer(GROUND_Y - 60, 180, 6, 30),   -- Far mountains
         generateMountainLayer(GROUND_Y - 40, 140, 8, 25),   -- Mid mountains
         generateMountainLayer(GROUND_Y - 20, 100, 10, 20),  -- Near mountains
     }
-    
+
     -- Generate clouds (2 layers)
     for i = 1, 5 do
         table.insert(clouds, generateCloud("far"))
@@ -192,6 +294,25 @@ function Background.init()
     for i = 1, 4 do
         table.insert(clouds, generateCloud("near"))
     end
+
+    -- Generate dust motes
+    for i = 1, 25 do
+        table.insert(dustMotes, generateDustMote())
+    end
+
+    -- Generate fog layers (horizontal bands near ground)
+    for i = 1, 3 do
+        table.insert(fogLayers, {
+            y = GROUND_Y - 30 - i * 25,
+            height = 40 + math.random() * 20,
+            alpha = 0.08 + math.random() * 0.06,
+            driftPhase = math.random() * math.pi * 2,
+        })
+    end
+
+    -- Generate foreground silhouettes
+    table.insert(foregroundElements, generateForegroundElement("left"))
+    table.insert(foregroundElements, generateForegroundElement("right"))
 end
 
 function Background.update(dt)
@@ -199,13 +320,77 @@ function Background.update(dt)
     for _, cloud in ipairs(clouds) do
         local speed = cloud.layer == "far" and CLOUD_SPEEDS.far or CLOUD_SPEEDS.near
         cloud.x = cloud.x + speed * dt
-        
+
         -- Wrap around when cloud goes off-screen
         if cloud.x > GAME_WIDTH + 300 then
             cloud.x = -300
             cloud.y = math.random(60, 280)
         end
     end
+
+    -- Update dust motes (gentle drifting)
+    for _, mote in ipairs(dustMotes) do
+        local time = love.timer.getTime()
+        local wobble = math.sin(time * mote.wobbleSpeed + mote.wobblePhase) * 5
+        mote.x = mote.x + (mote.driftX + wobble * 0.5) * dt
+        mote.y = mote.y + mote.driftY * dt
+
+        -- Wrap around
+        if mote.x < -10 then mote.x = GAME_WIDTH + 10 end
+        if mote.x > GAME_WIDTH + 10 then mote.x = -10 end
+        if mote.y < 30 then mote.y = GROUND_Y - 100 end
+        if mote.y > GROUND_Y - 50 then mote.y = 50 end
+    end
+
+    -- Update falling stars (comets)
+    for i = #fallingStars, 1, -1 do
+        local star = fallingStars[i]
+        star.x = star.x + star.vx * dt
+        star.y = star.y + star.vy * dt
+        star.age = star.age + dt
+        star.trail = star.trail or {}
+        -- Add trail point every frame for smoother trail
+        table.insert(star.trail, 1, {x = star.x, y = star.y})
+        if #star.trail > 20 then table.remove(star.trail) end  -- Longer trail (was 8)
+        -- Remove when off-screen or too old
+        if star.age > star.life or star.y > GROUND_Y or star.x > GAME_WIDTH + 50 then
+            table.remove(fallingStars, i)
+        end
+    end
+
+    -- Occasionally spawn a falling star/comet (slightly more common)
+    if math.random() < 0.002 then  -- ~0.2% chance per frame (was 0.1%)
+        table.insert(fallingStars, {
+            x = math.random(100, GAME_WIDTH - 100),
+            y = math.random(20, 150),
+            vx = math.random(250, 450),
+            vy = math.random(180, 350),
+            age = 0,
+            life = math.random() * 0.6 + 0.4,  -- Slightly longer life
+            brightness = math.random() * 0.2 + 0.8,  -- Brighter
+            trail = {},
+        })
+    end
+
+    -- Decay reactive effects
+    if lightningFlashTimer > 0 then
+        lightningFlashTimer = lightningFlashTimer - dt * 3  -- Fast decay
+    end
+    if moonPulseTimer > 0 then
+        moonPulseTimer = moonPulseTimer - dt
+        moonPulseIntensity = moonPulseTimer / 2  -- Fade over 2 seconds
+    end
+end
+
+-- Trigger lightning flash effect (call from main when lightning strikes)
+function Background.onLightningStrike()
+    lightningFlashTimer = 1.0
+end
+
+-- Trigger moon pulse effect (call from main on match start)
+function Background.onMatchStart()
+    moonPulseTimer = 2.0
+    moonPulseIntensity = 1.0
 end
 
 function Background.draw(W, H, cameraOffsetX)
@@ -223,13 +408,14 @@ function Background.draw(W, H, cameraOffsetX)
         love.graphics.rectangle("fill", 0, y, W, 4)
     end
 
-    -- ── Moon with glow ──
+    -- ── Moon with glow (reactive: pulses on match start) ──
     local moonParallaxX = moonX - cameraOffsetX * PARALLAX.moon
+    local moonGlowBoost = moonPulseIntensity * 0.15  -- Extra glow on match start
 
     -- Outer glow layers
     for i = 3, 1, -1 do
-        local glowRadius = moonRadius + i * 25
-        local alpha = 0.08 / i
+        local glowRadius = moonRadius + i * 25 + moonPulseIntensity * 10
+        local alpha = (0.08 + moonGlowBoost) / i
         love.graphics.setColor(COLORS.moon[1], COLORS.moon[2], COLORS.moon[3], alpha)
         love.graphics.circle("fill", moonParallaxX, moonY, glowRadius)
     end
@@ -252,11 +438,48 @@ function Background.draw(W, H, cameraOffsetX)
         love.graphics.circle("fill", starX, star.y, star.radius)
     end
 
-    -- ── Far clouds (behind mountains) ──
+    -- ── Falling stars / Comets with glowing trails ──
+    for _, fstar in ipairs(fallingStars) do
+        local alpha = fstar.brightness * (1 - fstar.age / fstar.life)
+        local trailLen = #fstar.trail
+
+        -- Draw outer glow trail (larger, more transparent)
+        for i, pt in ipairs(fstar.trail) do
+            local t = 1 - i / trailLen
+            local glowAlpha = alpha * t * 0.3
+            local glowSize = 6 * t
+            love.graphics.setColor(COLORS.fallingStar[1], COLORS.fallingStar[2], COLORS.fallingStar[3], glowAlpha)
+            love.graphics.circle("fill", pt.x, pt.y, glowSize)
+        end
+
+        -- Draw core trail (brighter, smaller)
+        for i, pt in ipairs(fstar.trail) do
+            local t = 1 - i / trailLen
+            local trailAlpha = alpha * t * 0.9  -- Brighter (was 0.6)
+            local trailSize = 3.5 * t  -- Larger (was 2)
+            love.graphics.setColor(COLORS.fallingStar[1], COLORS.fallingStar[2], COLORS.fallingStar[3], trailAlpha)
+            love.graphics.circle("fill", pt.x, pt.y, trailSize)
+        end
+
+        -- Draw head with glow
+        love.graphics.setColor(COLORS.fallingStar[1], COLORS.fallingStar[2], COLORS.fallingStar[3], alpha * 0.4)
+        love.graphics.circle("fill", fstar.x, fstar.y, 6)  -- Outer glow
+        love.graphics.setColor(COLORS.fallingStar[1], COLORS.fallingStar[2], COLORS.fallingStar[3], alpha)
+        love.graphics.circle("fill", fstar.x, fstar.y, 3.5)  -- Core (was 2.5)
+    end
+
+    -- ── Far clouds (behind mountains, reactive: brighten on lightning) ──
+    local cloudBrighten = math.max(0, lightningFlashTimer) * 0.3
     for _, cloud in ipairs(clouds) do
         if cloud.layer == "far" then
             local cloudX = cloud.x - cameraOffsetX * PARALLAX.cloudFar
-            drawCloud(cloud, cloudX, COLORS.cloudFar)
+            local color = {
+                COLORS.cloudFar[1] + cloudBrighten,
+                COLORS.cloudFar[2] + cloudBrighten,
+                COLORS.cloudFar[3] + cloudBrighten,
+                COLORS.cloudFar[4]
+            }
+            drawCloud(cloud, cloudX, color)
         end
     end
 
@@ -281,12 +504,43 @@ function Background.draw(W, H, cameraOffsetX)
         end
     end
 
-    -- ── Near clouds (in front of mountains, subtle) ──
+    -- ── Near clouds (in front of mountains, reactive: brighten on lightning) ──
     for _, cloud in ipairs(clouds) do
         if cloud.layer == "near" then
             local cloudX = cloud.x - cameraOffsetX * PARALLAX.cloudNear
-            drawCloud(cloud, cloudX, COLORS.cloudNear)
+            local color = {
+                COLORS.cloudNear[1] + cloudBrighten,
+                COLORS.cloudNear[2] + cloudBrighten,
+                COLORS.cloudNear[3] + cloudBrighten,
+                COLORS.cloudNear[4]
+            }
+            drawCloud(cloud, cloudX, color)
         end
+    end
+
+    -- ── Dust motes (floating particles in mid-air) ──
+    for _, mote in ipairs(dustMotes) do
+        local wobble = math.sin(time * mote.wobbleSpeed + mote.wobblePhase)
+        local alpha = mote.alpha * (0.7 + 0.3 * wobble)
+        love.graphics.setColor(COLORS.dustMote[1], COLORS.dustMote[2], COLORS.dustMote[3], alpha)
+        love.graphics.circle("fill", mote.x, mote.y, mote.size)
+    end
+
+    -- ── Fog layers near ground ──
+    for _, fog in ipairs(fogLayers) do
+        local drift = math.sin(time * 0.3 + fog.driftPhase) * 30
+        local alpha = fog.alpha * (0.8 + 0.2 * math.sin(time * 0.5 + fog.driftPhase))
+        love.graphics.setColor(COLORS.fog[1], COLORS.fog[2], COLORS.fog[3], alpha)
+        -- Draw as a soft horizontal band
+        love.graphics.rectangle("fill", -50 + drift, fog.y, W + 100, fog.height)
+    end
+end
+
+-- Draw foreground silhouettes (call after game world, before HUD)
+function Background.drawForeground(W, H, cameraOffsetX)
+    cameraOffsetX = cameraOffsetX or 0
+    for _, elem in ipairs(foregroundElements) do
+        drawForegroundElement(elem, cameraOffsetX)
     end
 end
 

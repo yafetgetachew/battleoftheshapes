@@ -3,16 +3,20 @@
 
 local Sounds  = require("sounds")
 local Network = require("network")
+local Map     = require("map")
 
 local Physics = {}
 
-Physics.GRAVITY       = 1200      -- pixels/s²
+Physics.GRAVITY       = 2200      -- pixels/s² (increased for snappier jumps)
 Physics.GROUND_Y      = 620       -- y-coordinate of the ground surface
-Physics.FRICTION      = 0.88      -- horizontal velocity damping each frame
+Physics.FRICTION      = 0.85      -- horizontal velocity damping each frame (slightly more friction)
 Physics.BOUNCE        = 0.0       -- bounce factor on ground hit
 Physics.WALL_LEFT     = 0
 Physics.WALL_RIGHT    = 1280
 Physics.PUSH_FORCE    = 400       -- push-apart force for overlapping players
+
+-- Callback for juice effects on dash impact (set by main.lua)
+Physics.onDashHit = nil  -- function(x, y, damage, targetPlayer) called on dash collision
 
 -- Apply gravity and integrate velocity for a single player
 function Physics.applyGravity(player, dt)
@@ -51,6 +55,39 @@ function Physics.resolveWalls(player)
     elseif player.x + halfW > Physics.WALL_RIGHT then
         player.x = Physics.WALL_RIGHT - halfW
         player.vx = 0
+    end
+end
+
+-- Resolve collisions with map platforms (one-way from bottom)
+function Physics.resolveMapCollisions(player, dt)
+    -- Only check if falling
+    if player.vy < 0 then return end
+    
+    local footerY = player.y + player.shapeHeight / 2
+    local prevY = player.y - player.vy * dt
+    local prevFooterY = prevY + player.shapeHeight / 2
+    local halfW = player.shapeWidth / 2
+    
+    for _, plat in ipairs(Map.platforms) do
+        -- Horizontal overlap test
+        if player.x + halfW > plat.x - plat.w/2 and 
+           player.x - halfW < plat.x + plat.w/2 then
+           
+            -- Vertical check:
+            -- 1. Currently falling through or on the platform
+            -- 2. Was previously above the platform
+            local platTop = plat.y - plat.h/2
+            
+            -- Tolerance window to catch high speed falling
+            -- Check if we crossed the platform TOP edge this frame
+            if prevFooterY <= platTop and footerY >= platTop then
+                player.y = platTop - player.shapeHeight / 2
+                player.vy = 0
+                player.onGround = true
+                -- We found a platform, no need to check others (unless multiple overlapping, but let's assume valid map)
+                return
+            end
+        end
     end
 end
 
@@ -104,50 +141,78 @@ function Physics.resolvePlayerCollision(p1, p2, dt)
     local Player = require("player")
 
     -- ── Dash collision ──
-    if isAuthority and (p1.isDashing or p2.isDashing) then
+    if (p1.isDashing or p2.isDashing) then
         local dasher = p1.isDashing and p1 or p2
         local target = p1.isDashing and p2 or p1
 
-        -- Apply damage to dasher (unless invulnerable)
-        if not dasher.invulnerable then
-            local dmg = Player.DASH_SELF_DAMAGE
-            if dasher.armor and dasher.armor > 0 then
-                local absorbed = math.min(dasher.armor, dmg)
-                dmg = dmg - absorbed
-                dasher.armor = dasher.armor - absorbed
-                if dasher.armor <= 0 then dasher.armor = 0 end
+        -- Visuals (Impact + Sound)
+        -- Client: only if not played yet for this dash instance
+        if isAuthority or not dasher.dashImpactPlayed then
+            -- Record impact for particle effects and sound
+            local impactX = (dasher.x + target.x) / 2
+            local impactY = (dasher.y + target.y) / 2
+            table.insert(Physics._dashImpacts, {x = impactX, y = impactY})
+            Sounds.play("dash_impact")
+            
+            if not isAuthority then
+                dasher.dashImpactPlayed = true
             end
-            dasher.life = math.max(0, dasher.life - dmg)
-            dasher.hitFlash = 0.25
         end
 
-        -- Apply damage to target (unless invulnerable)
-        if not target.invulnerable then
-            local dmg = Player.DASH_TARGET_DAMAGE
-            if target.armor and target.armor > 0 then
-                local absorbed = math.min(target.armor, dmg)
-                dmg = dmg - absorbed
-                target.armor = target.armor - absorbed
-                if target.armor <= 0 then target.armor = 0 end
+        -- Gameplay (Damage, Knockback, End Dash) - Authority Only
+        if isAuthority then
+            local dasherPrevLife = dasher.life
+            local targetPrevLife = target.life
+
+            -- Apply damage to dasher (unless invulnerable)
+            if not dasher.invulnerable then
+                local dmg = Player.DASH_SELF_DAMAGE
+                if dasher.armor and dasher.armor > 0 then
+                    local absorbed = math.min(dasher.armor, dmg)
+                    dmg = dmg - absorbed
+                    dasher.armor = dasher.armor - absorbed
+                    if dasher.armor <= 0 then dasher.armor = 0 end
+                end
+                dasher.life = math.max(0, dasher.life - dmg)
+                dasher.hitFlash = 0.25
             end
-            target.life = math.max(0, target.life - dmg)
-            target.hitFlash = 0.25
+
+            -- Apply damage to target (unless invulnerable)
+            if not target.invulnerable then
+                local dmg = Player.DASH_TARGET_DAMAGE
+                if target.armor and target.armor > 0 then
+                    local absorbed = math.min(target.armor, dmg)
+                    dmg = dmg - absorbed
+                    target.armor = target.armor - absorbed
+                    if target.armor <= 0 then target.armor = 0 end
+                end
+                target.life = math.max(0, target.life - dmg)
+                target.hitFlash = 0.25
+            end
+
+            -- Knockback the target
+            target.vx = Player.DASH_KNOCKBACK * dasher.dashDir
+
+            -- End the dash
+            dasher.isDashing = false
+            dasher.dashTimer = 0
+            dasher.vx = dasher.speed * dasher.dashDir * 0.2
+
+            -- Trigger juice callback for damage numbers
+            if Physics.onDashHit then
+                local dasherDmg = dasherPrevLife - dasher.life
+                local targetDmg = targetPrevLife - target.life
+                if dasherDmg > 0 then
+                    Physics.onDashHit(dasher.x, dasher.y, dasherDmg)
+                end
+                if targetDmg > 0 then
+                    Physics.onDashHit(target.x, target.y, targetDmg)
+                end
+            end
+
+            return  -- skip normal collision check after dash impact
         end
-
-        -- Knockback the target
-        target.vx = Player.DASH_KNOCKBACK * dasher.dashDir
-
-        -- End the dash
-        dasher.isDashing = false
-        dasher.dashTimer = 0
-        dasher.vx = dasher.speed * dasher.dashDir * 0.2
-
-        -- Record impact for particle effects and sound
-        local impactX = (dasher.x + target.x) / 2
-        local impactY = (dasher.y + target.y) / 2
-        table.insert(Physics._dashImpacts, {x = impactX, y = impactY})
-        Sounds.play("dash_impact")
-        return  -- skip normal collision resolution after dash impact
+        -- Clients fall through to normal collision resolution
     end
 
     -- Apply collision damage to the lower player (higher Y = lower on screen)
@@ -215,6 +280,7 @@ end
 function Physics.updatePlayer(player, dt)
     Physics.applyGravity(player, dt)
     Physics.resolveGround(player)
+    Physics.resolveMapCollisions(player, dt)
     Physics.resolveWalls(player)
 end
 

@@ -65,14 +65,14 @@ love.filesystem.write = love.filesystem.write or gfxNoop
 -- ─────────────────────────────────────────────
 -- Parse command-line arguments
 -- ─────────────────────────────────────────────
-local maxPlayers = 3
+local maxPlayers = 12
 local port = 27015
 
 local args = arg or {}
 for i = 1, #args do
     if args[i] == "--players" and args[i + 1] then
         local n = tonumber(args[i + 1])
-        if n == 2 or n == 3 then maxPlayers = n end
+        if n and n >= 2 and n <= 12 then maxPlayers = n end
     elseif args[i] == "--port" and args[i + 1] then
         local p = tonumber(args[i + 1])
         if p and p > 0 and p < 65536 then port = p end
@@ -86,6 +86,7 @@ local Player      = require("player")
 local Physics     = require("physics")
 local Selection   = require("selection")
 local Projectiles = require("projectiles")
+local Abilities   = require("abilities")
 local Network     = require("network")
 local Lightning   = require("lightning")
 local Dropbox     = require("dropbox")
@@ -205,6 +206,9 @@ function love.update(dt)
         -- Update projectiles
         Projectiles.update(dt, players)
 
+        -- Update special abilities
+        Abilities.update(dt, players)
+
         -- Update lightning (host-authoritative)
         Lightning.update(dt, players)
 
@@ -242,6 +246,25 @@ processNetworkMessages = function()
         if msg.type == "player_connected" then
             local connected = Network.getConnectedCount() - 1
             log("Player " .. msg.playerId .. " connected (" .. connected .. "/" .. maxPlayers .. ")")
+
+            -- Mark player as connected in selection
+            if selection then
+                selection:setConnected(msg.playerId, true)
+            end
+
+            -- Send existing connected players' status to the new client
+            for i = 1, maxPlayers do
+                if selection and selection.connected[i] and i ~= msg.playerId then
+                    Network.sendTo(msg.playerId, "player_status", {pid = i, connected = true}, true)
+                end
+                -- Send existing player names to the new client
+                if i ~= msg.playerId and players[i] and players[i].name then
+                    Network.sendTo(msg.playerId, "player_name", {pid = i, name = players[i].name}, true)
+                end
+            end
+            -- Relay to other clients that this player connected
+            Network.relay(msg.playerId, "player_status", {pid = msg.playerId, connected = true}, true)
+
             if gameState == "waiting" then
                 gameState = "selection"
                 log("Selection phase started")
@@ -252,6 +275,13 @@ processNetworkMessages = function()
             if players[msg.playerId] then
                 players[msg.playerId].life = 0
             end
+            -- Mark player as disconnected in selection
+            if selection then
+                selection:setConnected(msg.playerId, false)
+                selection.confirmed[msg.playerId] = false
+            end
+            -- Relay to other clients
+            Network.relay(msg.playerId, "player_status", {pid = msg.playerId, connected = false}, true)
 
         elseif msg.type == "sel_browse" then
             local data = msg.data
@@ -292,11 +322,29 @@ processNetworkMessages = function()
                 Network.relay(data.pid, "player_cast", data, true)
             end
 
+        elseif msg.type == "player_special" then
+            local data = msg.data
+            if data and data.pid and players[data.pid] then
+                local p = players[data.pid]
+                Abilities.cast(p, p.shapeKey, p.facingRight)
+                Network.relay(data.pid, "player_special", data, true)
+            end
+
         elseif msg.type == "player_dash" then
             local data = msg.data
             if data and data.pid and players[data.pid] then
                 players[data.pid]:dash(data.dir)
                 Network.relay(data.pid, "player_dash", data, true)
+            end
+
+        elseif msg.type == "player_name" then
+            local data = msg.data
+            if data and data.pid and data.name then
+                if players[data.pid] then
+                    players[data.pid].name = data.name
+                end
+                -- Relay to other clients
+                Network.relay(data.pid, "player_name", data, true)
             end
         end
     end
@@ -369,19 +417,35 @@ startCountdown = function()
         players[i]:setShape(choices[i])
     end
     Projectiles.clear()
+    Abilities.clear()
     Dropbox.reset()
 
-    -- Spawn positions
+    -- Find which players are connected/active
+    local activePlayers = {}
+    for i = 1, maxPlayers do
+        if selection and selection.connected[i] then
+            table.insert(activePlayers, i)
+        end
+    end
+
+    -- Spawn positions (spread evenly across the stage)
     local stageLeft = 250
     local stageRight = 1030
-    if maxPlayers == 2 then
-        players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
-        players[2]:spawn(stageRight, Physics.GROUND_Y - players[2].shapeHeight / 2)
+    local stageWidth = stageRight - stageLeft
+    local activeCount = #activePlayers
+
+    if activeCount == 1 then
+        local pid = activePlayers[1]
+        players[pid]:spawn((stageLeft + stageRight) / 2, Physics.GROUND_Y - players[pid].shapeHeight / 2)
+    elseif activeCount == 2 then
+        players[activePlayers[1]]:spawn(stageLeft, Physics.GROUND_Y - players[activePlayers[1]].shapeHeight / 2)
+        players[activePlayers[2]]:spawn(stageRight, Physics.GROUND_Y - players[activePlayers[2]].shapeHeight / 2)
     else
-        local stageMiddle = (stageLeft + stageRight) / 2
-        players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
-        players[2]:spawn(stageMiddle, Physics.GROUND_Y - players[2].shapeHeight / 2)
-        players[3]:spawn(stageRight, Physics.GROUND_Y - players[3].shapeHeight / 2)
+        for idx, pid in ipairs(activePlayers) do
+            local t = (idx - 1) / (activeCount - 1)
+            local x = stageLeft + t * stageWidth
+            players[pid]:spawn(x, Physics.GROUND_Y - players[pid].shapeHeight / 2)
+        end
     end
 
     countdownTimer = 3.0
@@ -393,9 +457,14 @@ startCountdown = function()
     for i = 1, maxPlayers do
         data["s" .. i] = choices[i]
     end
+    -- Send active player list as flat keys (ap1=pid, ap2=pid, apc=count)
+    data.apc = activeCount
+    for idx, pid in ipairs(activePlayers) do
+        data["ap" .. idx] = pid
+    end
     Network.send("start_countdown", data, true)
 
-    log("Countdown started!")
+    log("Countdown started! Active players: " .. activeCount)
 end
 
 -- ─────────────────────────────────────────────
@@ -430,6 +499,7 @@ restartGame = function()
     winner = nil
     restartTimer = nil
     Projectiles.clear()
+    Abilities.clear()
     Lightning.reset()
     Dropbox.reset()
     networkSyncTimer = 0

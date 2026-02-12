@@ -7,12 +7,14 @@ local Physics     = require("physics")
 local Selection   = require("selection")
 local HUD         = require("hud")
 local Projectiles = require("projectiles")
+local Abilities   = require("abilities")
 local Network     = require("network")
 local Lightning   = require("lightning")
 local Sounds      = require("sounds")
 local Config      = require("config")
 local Dropbox     = require("dropbox")
 local Background  = require("background")
+local Map         = require("map")
 
 -- Game states: "splash", "menu", "settings", "connecting", "selection", "countdown", "playing", "gameover"
 -- (Note: "browsing" state was removed - use "Join by IP" instead)
@@ -25,9 +27,25 @@ local countdownValue
 local splashTimer = 0
 local networkSyncTimer = 0
 
--- Screen shake state
-local screenShakeTimer = 0     -- remaining shake time (seconds)
-local screenShakeIntensity = 0 -- current shake magnitude (pixels)
+-- Screen shake state (improved: frequency-based with falloff curve)
+local screenShakeTimer = 0       -- remaining shake time (seconds)
+local screenShakeIntensity = 0   -- current shake magnitude (pixels)
+local screenShakeFrequency = 30  -- shake oscillation frequency (Hz)
+local screenShakePhase = 0       -- current phase for smooth shake
+local screenShakeDuration = 0    -- total duration (for falloff curve)
+
+-- Camera state (dynamic framing + micro-zoom)
+local cameraX, cameraY = 0, 0            -- current camera offset (world coords)
+local cameraTargetX, cameraTargetY = 0, 0 -- target camera position
+local cameraZoom = 1.0                    -- current zoom level
+local cameraTargetZoom = 1.0              -- target zoom level
+local cameraZoomTimer = 0                 -- remaining micro-zoom time
+
+-- Hit pause state
+local hitPauseTimer = 0  -- remaining freeze time (seconds)
+
+-- Damage numbers
+local damageNumbers = {}  -- {x, y, value, age, vx, vy}
 
 -- Low health heartbeat state
 local heartbeatTimer = 0       -- time until next heartbeat sound
@@ -41,8 +59,10 @@ local bots = {}            -- bot AI state for each bot player
 local menuChoice = 1       -- 1 = Host, 2 = Join, 3 = Demo, 4 = Settings
 local joinAddress = ""
 local menuStatus = ""
-local settingsRow = 1      -- 1-3 for grid rows
+local settingsRow = 1      -- 1-4 for grid rows
 local settingsCol = 1      -- 1-2 for grid columns (left/right)
+local settingsEditingName = false  -- true when typing name
+local settingsNameBuffer = ""      -- temporary buffer while typing name
 local serverMode = false   -- true = dedicated server (host is relay only)
 local ipHistoryIndex = 0   -- 0 = typing new IP, 1+ = selecting from history
 
@@ -69,6 +89,177 @@ local function getFont(size)
 end
 
 -- ─────────────────────────────────────────────
+-- Juice helpers: screen shake, hit pause, damage numbers, camera
+-- ─────────────────────────────────────────────
+
+-- Trigger screen shake with frequency-based oscillation and falloff
+local function addScreenShake(intensity, duration, frequency)
+    screenShakeTimer = duration
+    screenShakeDuration = duration
+    screenShakeIntensity = intensity
+    screenShakeFrequency = frequency or 30
+    -- Randomize phase so consecutive shakes don't look identical
+    screenShakePhase = math.random() * math.pi * 2
+end
+
+-- Trigger hit pause (freezes game for a brief moment)
+local function addHitPause(duration)
+    hitPauseTimer = math.max(hitPauseTimer, duration)
+end
+
+-- Trigger camera micro-zoom (punch in then ease back)
+local function addCameraZoom(targetZoom, duration)
+    cameraTargetZoom = targetZoom
+    cameraZoomTimer = duration
+end
+
+-- Spawn a damage number at position
+local function spawnDamageNumber(x, y, value)
+    if not Config.getDamageNumbers() then return end
+    table.insert(damageNumbers, {
+        x = x,
+        y = y - 20,  -- Start slightly above hit point
+        value = math.floor(value + 0.5),
+        age = 0,
+        maxAge = 0.8,
+        vx = (math.random() - 0.5) * 30,
+        vy = -80  -- Float upward
+    })
+end
+
+-- Initialize camera to correct position instantly (no interpolation)
+local function initCamera(alivePlayers)
+    local sumX, sumY = 0, 0
+    local count = 0
+    for _, p in ipairs(alivePlayers) do
+        if p.life > 0 then
+            sumX = sumX + p.x
+            sumY = sumY + p.y
+            count = count + 1
+        end
+    end
+    if count > 0 then
+        local centerX = sumX / count
+        local centerY = sumY / count
+        cameraTargetX = (centerX - GAME_WIDTH / 2) * 0.3
+        cameraTargetY = math.max(-30, math.min(30, (centerY - 400) * 0.1))
+        -- Set camera directly to target (no interpolation)
+        cameraX = cameraTargetX
+        cameraY = cameraTargetY
+    else
+        cameraX, cameraY = 0, 0
+        cameraTargetX, cameraTargetY = 0, 0
+    end
+    cameraZoom = 1.0
+    cameraTargetZoom = 1.0
+    cameraZoomTimer = 0
+end
+
+-- Update camera to follow players with lead
+local function updateCamera(dt, alivePlayers)
+    -- Calculate center of alive players
+    local sumX, sumY, sumVX = 0, 0, 0
+    local count = 0
+    for _, p in ipairs(alivePlayers) do
+        if p.life > 0 then
+            sumX = sumX + p.x
+            sumY = sumY + p.y
+            sumVX = sumVX + (p.vx or 0)
+            count = count + 1
+        end
+    end
+
+    if count > 0 then
+        local centerX = sumX / count
+        local centerY = sumY / count
+        local avgVX = sumVX / count
+
+        -- Add slight lead in movement direction
+        local leadAmount = 30
+        centerX = centerX + (avgVX / 300) * leadAmount
+
+        -- Calculate offset from default center (GAME_WIDTH/2, vertical stays fixed)
+        cameraTargetX = (centerX - GAME_WIDTH / 2) * 0.3
+        cameraTargetY = math.max(-30, math.min(30, (centerY - 400) * 0.1))
+    else
+        cameraTargetX = 0
+        cameraTargetY = 0
+    end
+
+    -- Smooth interpolation toward target
+    local smoothing = 5 * dt
+    cameraX = cameraX + (cameraTargetX - cameraX) * smoothing
+    cameraY = cameraY + (cameraTargetY - cameraY) * smoothing
+
+    -- Update zoom
+    if cameraZoomTimer > 0 then
+        cameraZoomTimer = cameraZoomTimer - dt
+        if cameraZoomTimer <= 0 then
+            cameraTargetZoom = 1.0
+            cameraZoomTimer = 0
+        end
+    end
+    -- Smooth zoom interpolation
+    local zoomSmoothing = 8 * dt
+    cameraZoom = cameraZoom + (cameraTargetZoom - cameraZoom) * zoomSmoothing
+end
+
+-- Calculate current screen shake offset (frequency-based with falloff)
+local function getScreenShakeOffset()
+    if screenShakeTimer <= 0 then
+        return 0, 0
+    end
+    -- Falloff curve: starts at 1.0, decays to 0
+    local progress = screenShakeTimer / screenShakeDuration
+    local falloff = progress * progress  -- Quadratic falloff (fast decay at end)
+
+    -- Frequency-based oscillation (smooth sine wave, not random jitter)
+    local time = love.timer.getTime()
+    local shakeX = math.sin(time * screenShakeFrequency + screenShakePhase) * screenShakeIntensity * falloff
+    local shakeY = math.cos(time * screenShakeFrequency * 1.1 + screenShakePhase) * screenShakeIntensity * falloff * 0.7
+
+    return shakeX, shakeY
+end
+
+-- Update damage numbers
+local function updateDamageNumbers(dt)
+    for i = #damageNumbers, 1, -1 do
+        local dn = damageNumbers[i]
+        dn.age = dn.age + dt
+        dn.x = dn.x + dn.vx * dt
+        dn.y = dn.y + dn.vy * dt
+        dn.vy = dn.vy + 50 * dt  -- Slight gravity to arc upward then slow
+        if dn.age >= dn.maxAge then
+            table.remove(damageNumbers, i)
+        end
+    end
+end
+
+-- Draw damage numbers (call in world space)
+local function drawDamageNumbers()
+    for _, dn in ipairs(damageNumbers) do
+        local progress = dn.age / dn.maxAge
+        local alpha = 1 - progress * progress  -- Fade out
+        local scale = 1 + progress * 0.3       -- Slight grow
+
+        -- Color based on damage amount
+        local r, g, b = 1, 0.9, 0.3  -- Yellow-orange default
+        if dn.value >= 20 then
+            r, g, b = 1, 0.3, 0.2  -- Red for big hits
+        elseif dn.value >= 15 then
+            r, g, b = 1, 0.5, 0.2  -- Orange for medium
+        end
+
+        love.graphics.setColor(0, 0, 0, alpha * 0.5)
+        love.graphics.setFont(getFont(math.floor(18 * scale)))
+        love.graphics.printf(tostring(dn.value), dn.x - 50 + 1, dn.y + 1, 100, "center")
+
+        love.graphics.setColor(r, g, b, alpha)
+        love.graphics.printf(tostring(dn.value), dn.x - 50, dn.y, 100, "center")
+    end
+end
+
+-- ─────────────────────────────────────────────
 -- love.load
 -- ─────────────────────────────────────────────
 function love.load()
@@ -88,6 +279,50 @@ function love.load()
     Sounds.load()
     -- Apply saved music mute setting
     Sounds.setMusicMuted(Config.getMusicMuted())
+
+    -- Set up projectile hit callbacks for juice effects
+    Projectiles.onHit = function(x, y, damage)
+        spawnDamageNumber(x, y, damage)
+        addHitPause(0.04)  -- 40ms hit pause on regular hits
+        addScreenShake(3, 0.1, 45)
+    end
+    Projectiles.onKill = function(x, y)
+        addHitPause(0.06)  -- Extra 60ms on kill (stacks with death explosion)
+    end
+
+    -- Set up abilities hit callbacks for juice effects
+    Abilities.onHit = function(x, y, damage)
+        spawnDamageNumber(x, y, damage)
+        addHitPause(0.04)  -- 40ms hit pause on ability hits
+        addScreenShake(4, 0.12, 40)
+    end
+    Abilities.onKill = function(x, y)
+        addHitPause(0.06)  -- Extra 60ms on kill
+    end
+
+    -- Set up player damage callback for network damage numbers + juice
+    Player.onDamageReceived = function(x, y, damage)
+        spawnDamageNumber(x, y, damage)
+        -- Add juice effects for clients (who don't get direct collision callbacks)
+        -- Use generic values that feel good for most hits
+        addHitPause(0.06)
+        addScreenShake(5, 0.2, 30)
+        Sounds.play("player_hurt") -- Ensure hurt sound plays if not already handled
+    end
+
+    -- Set up lightning hit callbacks for juice effects
+    Lightning.onHit = function(x, y, damage)
+        spawnDamageNumber(x, y, damage)
+        addHitPause(0.05)  -- 50ms hit pause on lightning hit
+    end
+    Lightning.onWarningStart = function(x)
+        Sounds.playLightningWarning()  -- Start warning sound ramp
+    end
+
+    -- Set up dash collision callbacks for juice effects
+    Physics.onDashHit = function(x, y, damage)
+        spawnDamageNumber(x, y, damage)
+    end
 
     gameState = "splash"
     splashTimer = 0
@@ -120,8 +355,15 @@ function love.update(dt)
     -- Cap delta to avoid physics tunneling on lag spikes
     dt = math.min(dt, 1/30)
 
-    -- Update parallax background (clouds drift)
-    Background.update(dt)
+    -- Hit pause: freeze game briefly on big impacts (but keep updating camera/shake)
+    local realDt = dt
+    if hitPauseTimer > 0 then
+        hitPauseTimer = hitPauseTimer - realDt
+        dt = 0  -- Freeze game simulation
+    end
+
+    -- Update parallax background (clouds drift) - use realDt so clouds keep moving during hit pause
+    Background.update(realDt)
 
     if gameState == "splash" then
         splashTimer = splashTimer + dt
@@ -176,6 +418,7 @@ function love.update(dt)
             Lightning.reset()
             Dropbox.reset()
             Sounds.startMusic()  -- Start background music when gameplay begins
+            Background.onMatchStart()  -- Moon glow pulse
         end
 
     elseif gameState == "playing" then
@@ -204,12 +447,16 @@ function love.update(dt)
             -- Spawn dash impact particles
             for _, impact in ipairs(Physics.consumeDashImpacts()) do
                 Projectiles.spawnDashImpact(impact.x, impact.y)
-                screenShakeTimer = 0.15
-                screenShakeIntensity = 4
+                addScreenShake(6, 0.15, 40)
+                addHitPause(0.05)  -- 50ms hit pause on dash impact
+                addCameraZoom(1.02, 0.15)
             end
 
             -- Update projectiles
             Projectiles.update(dt, players)
+
+            -- Update special abilities
+            Abilities.update(dt, players)
 
             -- Update lightning (host-authoritative)
             if Network.getRole() == Network.ROLE_HOST or Network.getRole() == Network.ROLE_NONE then
@@ -218,8 +465,8 @@ function love.update(dt)
 
             -- Screen shake on lightning strike (works for host, client, and solo)
             if Lightning.consumeStrike() then
-                screenShakeTimer = 0.3
-                screenShakeIntensity = 6
+                addScreenShake(8, 0.3, 25)
+                Background.onLightningStrike()  -- Brighten clouds
             end
 
             -- Update dropboxes
@@ -231,8 +478,9 @@ function love.update(dt)
                 if p:consumeDeath() then
                     Sounds.play("death")
                     Projectiles.spawnDeathExplosion(p.x, p.y, p.shapeKey)
-                    screenShakeTimer = 0.4
-                    screenShakeIntensity = 8
+                    addScreenShake(12, 0.5, 20)
+                    addHitPause(0.08)  -- 80ms hit pause on death
+                    addCameraZoom(1.05, 0.25)
                 end
             end
 
@@ -250,6 +498,23 @@ function love.update(dt)
                 end
             end
 
+            -- Continuous aiming: update local player aim position every frame
+            local localPlayer = getLocalPlayer()
+            if localPlayer and localPlayer.life > 0 then
+                 local mx, my = love.mouse.getPosition()
+                 local gameX = (mx - offsetX) / scaleX
+                 local gameY = (my - offsetY) / scaleY
+                 local W, H = GAME_WIDTH, GAME_HEIGHT
+                 local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
+                 local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
+                 localPlayer.aimX = worldX
+                 localPlayer.aimY = worldY
+                 -- DEBUG: Print aim coords periodically
+                 if math.random() < 0.01 then
+                     print("Main: Player " .. localPlayer.id .. " aim set to " .. math.floor(worldX) .. ", " .. math.floor(worldY))
+                 end
+            end
+
             -- Check for game over (last player standing)
             checkGameOver()
         end
@@ -261,14 +526,23 @@ function love.update(dt)
         end
     end
 
-    -- Decay screen shake
+    -- Decay screen shake (use realDt so shake continues during hit pause)
     if screenShakeTimer > 0 then
-        screenShakeTimer = screenShakeTimer - dt
+        screenShakeTimer = screenShakeTimer - realDt
         if screenShakeTimer <= 0 then
             screenShakeTimer = 0
             screenShakeIntensity = 0
         end
     end
+
+    -- Update camera (use realDt so camera keeps moving during hit pause)
+    -- Also update during countdown so camera is already positioned when game starts
+    if gameState == "countdown" or gameState == "playing" or gameState == "gameover" then
+        updateCamera(realDt, players)
+    end
+
+    -- Update damage numbers (use realDt so they keep floating during hit pause)
+    updateDamageNumbers(realDt)
 
     -- Low health heartbeat (only during gameplay for local player)
     if gameState == "playing" then
@@ -299,8 +573,10 @@ end
 function love.draw()
     -- Apply scaling and offset for proper aspect ratio
     love.graphics.push()
-    local shakeX = screenShakeTimer > 0 and (math.random() - 0.5) * screenShakeIntensity * 2 or 0
-    local shakeY = screenShakeTimer > 0 and (math.random() - 0.5) * screenShakeIntensity * 2 or 0
+
+    -- Get frequency-based screen shake offset
+    local shakeX, shakeY = getScreenShakeOffset()
+
     love.graphics.translate(offsetX + shakeX, offsetY + shakeY)
     love.graphics.scale(scaleX, scaleY)
 
@@ -316,7 +592,7 @@ function love.draw()
     elseif gameState == "connecting" then
         drawConnecting(W, H)
     elseif gameState == "selection" then
-        selection:draw(W, H, Config.getControls())
+        selection:draw(W, H, Config.getControls(), players)
         if serverMode then
             -- Server mode overlay on selection screen
 	        love.graphics.setFont(getFont(16))
@@ -327,8 +603,20 @@ function love.draw()
         -- ── Sky gradient ──
         drawBackground(W, H)
 
+
         -- ── Ground ──
         drawGround(W, H)
+
+
+        -- Apply camera transform for game world elements
+        love.graphics.push()
+        -- Zoom from center of screen
+        love.graphics.translate(W/2, H/2)
+        love.graphics.scale(cameraZoom, cameraZoom)
+        love.graphics.translate(-W/2 - cameraX, -H/2 - cameraY)
+
+        -- ── Platforms ──
+        Map.draw()
 
         -- ── Player shadows ──
         for _, p in ipairs(players) do p:drawShadow() end
@@ -340,13 +628,26 @@ function love.draw()
         -- ── Projectiles ──
         Projectiles.draw()
 
+        -- ── Special Abilities ──
+        Abilities.draw()
+
         -- ── Dropboxes ──
         Dropbox.draw()
 
-        -- ── Lightning ──
+        -- ── Lightning (world elements only) ──
         Lightning.draw(W, H)
 
-        -- ── HUD ──
+        -- ── Damage numbers ──
+        drawDamageNumbers()
+
+        -- End camera transform
+        love.graphics.pop()
+
+        -- ── Foreground silhouettes (parallax depth cues) ──
+        local parallaxOffset = Background.getParallaxOffset(players, W)
+        Background.drawForeground(W, H, parallaxOffset)
+
+        -- ── HUD (not affected by camera) ──
         HUD.draw(players, W)
 
         -- ── Countdown overlay ──
@@ -457,18 +758,48 @@ function love.keypressed(key)
                 end
             end
             if key == localPlayer.controls.jump then
-                if localPlayer.onGround then
+                if localPlayer:jump() then
                     Sounds.play("jump")
-                end
-                localPlayer:jump()
-                if Network.getRole() ~= Network.ROLE_NONE then
-                    Network.send("player_jump", {pid = localPlayer.id}, true)
+                    if Network.getRole() ~= Network.ROLE_NONE then
+                        Network.send("player_jump", {pid = localPlayer.id}, true)
+                    end
                 end
             end
             if key == localPlayer.controls.cast then
-                localPlayer:castAbilityAtNearest(players)
+                -- Mouse aiming
+                local mx, my = love.mouse.getPosition()
+                -- Inverse camera transform:
+                -- Screen -> Translate(-offsetX, -offsetY) -> Scale(1/scale) -> Translate(camX, camY) -> Translate(-W/2, -H/2) -> Scale(1/zoom) -> Translate(W/2, H/2)
+                -- Actually easier: World = (Screen - Center) / Zoom + Center + Camera - Offset
+                
+                -- Step 1: Undo letterboxing/scaling
+                local gameX = (mx - offsetX) / scaleX
+                local gameY = (my - offsetY) / scaleY
+                
+                -- Step 2: Undo camera zoom/pan
+                local W, H = GAME_WIDTH, GAME_HEIGHT
+                local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
+                local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
+
+                localPlayer:castAbilityAt(worldX, worldY)
+
                 if Network.getRole() ~= Network.ROLE_NONE then
-                    Network.send("player_cast", {pid = localPlayer.id}, true)
+                    Network.send("player_cast", {pid = localPlayer.id, tx = worldX, ty = worldY}, true)
+                end
+            end
+            if key == localPlayer.controls.special then
+                -- Mouse aiming for special ability
+                local mx, my = love.mouse.getPosition()
+                local gameX = (mx - offsetX) / scaleX
+                local gameY = (my - offsetY) / scaleY
+                local W, H = GAME_WIDTH, GAME_HEIGHT
+                local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
+                local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
+
+                if Abilities.cast(localPlayer, localPlayer.shapeKey, localPlayer.facingRight, worldX, worldY) then
+                    if Network.getRole() ~= Network.ROLE_NONE then
+                        Network.send("player_special", {pid = localPlayer.id, tx = worldX, ty = worldY}, true)
+                    end
                 end
             end
         end
@@ -482,6 +813,26 @@ function love.keypressed(key)
 end
 
 -- ─────────────────────────────────────────────
+-- love.keyreleased
+-- ─────────────────────────────────────────────
+function love.keyreleased(key)
+    if gameState == "playing" then
+         local pid = Network.getLocalPlayerId()
+         if pid and players[pid] and not players[pid].isRemote then
+             local p = players[pid]
+             if p.controls and key == p.controls.jump then
+                 p:stopJump()
+                 if Network.getRole() ~= Network.ROLE_NONE then
+                    -- Optional: Send network event for jump stop if needed for precise sync
+                    -- Network.send("player_stop_jump", {pid = p.id}, true)
+                 end
+             end
+         end
+    end
+end
+
+
+-- ─────────────────────────────────────────────
 -- Helper: Transition from selection → countdown
 -- ─────────────────────────────────────────────
 function startCountdown()
@@ -490,28 +841,58 @@ function startCountdown()
         players[i]:setShape(choices[i])
     end
     Projectiles.clear()
+    Abilities.clear()
+
+    -- Find which players are connected/active
+    local activePlayers = {}
+    for i = 1, maxPlayers do
+        if selection and selection.connected[i] then
+            table.insert(activePlayers, i)
+        elseif demoMode then
+            -- In demo mode, all created players are active
+            table.insert(activePlayers, i)
+        end
+    end
 
     -- Spawn positions (spread evenly across the stage)
     local stageLeft = 250
     local stageRight = 1030
-    if maxPlayers == 2 then
-        players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
-        players[2]:spawn(stageRight, Physics.GROUND_Y - players[2].shapeHeight / 2)
+    local stageWidth = stageRight - stageLeft
+    local activeCount = #activePlayers
+
+    if activeCount == 1 then
+        -- Single player - center
+        local pid = activePlayers[1]
+        players[pid]:spawn((stageLeft + stageRight) / 2, Physics.GROUND_Y - players[pid].shapeHeight / 2)
+    elseif activeCount == 2 then
+        -- Two players - left and right
+        players[activePlayers[1]]:spawn(stageLeft, Physics.GROUND_Y - players[activePlayers[1]].shapeHeight / 2)
+        players[activePlayers[2]]:spawn(stageRight, Physics.GROUND_Y - players[activePlayers[2]].shapeHeight / 2)
     else
-        local stageMiddle = (stageLeft + stageRight) / 2
-        players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
-        players[2]:spawn(stageMiddle, Physics.GROUND_Y - players[2].shapeHeight / 2)
-        players[3]:spawn(stageRight, Physics.GROUND_Y - players[3].shapeHeight / 2)
+        -- 3+ players - spread evenly
+        for idx, pid in ipairs(activePlayers) do
+            local t = (idx - 1) / (activeCount - 1)  -- 0 to 1
+            local x = stageLeft + t * stageWidth
+            players[pid]:spawn(x, Physics.GROUND_Y - players[pid].shapeHeight / 2)
+        end
     end
 
     countdownTimer = 3.0
     countdownValue = 3
     gameState = "countdown"
 
+    -- Initialize camera to correct position immediately (prevents "floating" illusion)
+    initCamera(players)
+
     if Network.getRole() == Network.ROLE_HOST then
         local data = {}
         for i = 1, maxPlayers do
             data["s" .. i] = choices[i]
+        end
+        -- Send active player list as flat keys (ap1=pid, ap2=pid, apc=count)
+        data.apc = activeCount
+        for idx, pid in ipairs(activePlayers) do
+            data["ap" .. idx] = pid
         end
         Network.send("start_countdown", data, true)
     end
@@ -568,7 +949,7 @@ function drawControlsHint(W, H)
 	love.graphics.setFont(getFont(11))
     love.graphics.setColor(1, 1, 1, 0.25)
     local pid = Network.getLocalPlayerId()
-    local hint = "P" .. pid .. ": A/D move (double-tap dash) · Space jump · W cast    |    ESC menu"
+    local hint = "P" .. pid .. ": A/D move (double-tap dash) · Space jump · W cast · E special    |    ESC menu"
     love.graphics.printf(hint, 0, H - 22, W, "center")
 end
 
@@ -583,7 +964,7 @@ end
 function drawDemoHint(W, H)
 	love.graphics.setFont(getFont(11))
     love.graphics.setColor(0.4, 1, 0.6, 0.35)
-    local hint = "DEMO MODE — P1: A/D move (double-tap dash) · Space jump · W cast    |    ESC menu"
+    local hint = "DEMO MODE — P1: A/D move (double-tap dash) · Space jump · W cast · E special    |    ESC menu"
     love.graphics.printf(hint, 0, H - 22, W, "center")
 end
 
@@ -689,27 +1070,52 @@ end
 -- Settings Screen
 -- ─────────────────────────────────────────────
 function handleSettingsKey(key)
-    -- Grid layout: 2 columns x 3 rows
-    -- Left col (1): Control Scheme, Player Count, Server Mode
-    -- Right col (2): Aim Assist, Demo Invulnerability, Background Music
-    local maxRows = 3
+    -- Grid layout: 2 columns x 4 rows
+    -- Left col (1): Control Scheme, Player Count, Server Mode, Player Name
+    -- Right col (2): Aim Assist, Demo Invulnerable, Music, (empty)
+    local maxRows = 4
     local maxCols = 2
+
+    -- Handle name editing mode
+    if settingsEditingName then
+        if key == "return" or key == "escape" then
+            -- Save and exit editing mode
+            Config.setPlayerName(settingsNameBuffer)
+            settingsEditingName = false
+            Sounds.play("menu_nav")
+        elseif key == "backspace" then
+            settingsNameBuffer = settingsNameBuffer:sub(1, -2)
+        end
+        return  -- Don't process other keys while editing
+    end
 
     if key == "up" or key == "w" then
         settingsRow = settingsRow - 1
         if settingsRow < 1 then settingsRow = maxRows end
+        -- Skip row 4 col 2 (empty cell)
+        if settingsRow == 4 and settingsCol == 2 then settingsRow = 3 end
         Sounds.play("menu_nav")
     elseif key == "down" or key == "s" then
         settingsRow = settingsRow + 1
         if settingsRow > maxRows then settingsRow = 1 end
+        -- Skip row 4 col 2 (empty cell)
+        if settingsRow == 4 and settingsCol == 2 then settingsRow = 1 end
         Sounds.play("menu_nav")
-    elseif key == "tab" then
-        -- Switch columns
-        settingsCol = settingsCol == 1 and 2 or 1
+    elseif key == "left" or key == "a" then
+        -- Navigate to left column
+        if settingsCol > 1 then
+            settingsCol = settingsCol - 1
+            Sounds.play("menu_nav")
+        end
+    elseif key == "right" or key == "d" then
+        -- Navigate to right column (but not on row 4)
+        if settingsCol < maxCols and settingsRow < 4 then
+            settingsCol = settingsCol + 1
+            Sounds.play("menu_nav")
+        end
+    elseif key == "space" or key == "return" then
+        -- Toggle/change the selected setting
         Sounds.play("menu_nav")
-    elseif key == "left" or key == "a" or key == "right" or key == "d" then
-        Sounds.play("menu_nav")
-        -- Toggle settings based on current grid position
         if settingsCol == 1 then
             -- Left column
             if settingsRow == 1 then
@@ -717,12 +1123,18 @@ function handleSettingsKey(key)
                 local current = Config.getControlScheme()
                 Config.setControlScheme(current == "wasd" and "arrows" or "wasd")
             elseif settingsRow == 2 then
-                -- Toggle player count
+                -- Cycle player count (2-12)
                 local current = Config.getPlayerCount()
-                Config.setPlayerCount(current == 2 and 3 or 2)
+                local next = current + 1
+                if next > 12 then next = 2 end
+                Config.setPlayerCount(next)
             elseif settingsRow == 3 then
                 -- Toggle server mode
                 Config.setServerMode(not Config.getServerMode())
+            elseif settingsRow == 4 then
+                -- Start editing player name
+                settingsEditingName = true
+                settingsNameBuffer = Config.getPlayerName() or ""
             end
         else
             -- Right column
@@ -745,6 +1157,16 @@ function handleSettingsKey(key)
     end
 end
 
+-- Handle text input for name editing
+function handleSettingsTextInput(text)
+    if settingsEditingName then
+        -- Limit name length to 12 characters
+        if #settingsNameBuffer < 12 then
+            settingsNameBuffer = settingsNameBuffer .. text
+        end
+    end
+end
+
 function drawSettings(W, H)
     love.graphics.setColor(0.06, 0.06, 0.1)
     love.graphics.rectangle("fill", 0, 0, W, H)
@@ -752,19 +1174,19 @@ function drawSettings(W, H)
     -- Title
     love.graphics.setFont(getFont(32))
     love.graphics.setColor(1.0, 0.85, 0.2)
-    love.graphics.printf("Settings", 0, 50, W, "center")
+    love.graphics.printf("Settings", 0, 40, W, "center")
 
-    -- Grid layout: 2 columns x 3 rows
-    local labelFont = getFont(16)
-    local valueFont = getFont(20)
+    -- Grid layout: 2 columns x 4 rows
+    local labelFont = getFont(14)
+    local valueFont = getFont(18)
     local colWidth = 320
     local leftColX = W/2 - colWidth - 40
     local rightColX = W/2 + 40
-    local startY = 130
-    local rowHeight = 140
+    local startY = 100
+    local rowHeight = 115
 
     -- Helper to draw a setting cell
-    local function drawCell(col, row, label, value, isOn, detail)
+    local function drawCell(col, row, label, value, isOn, detail, isEditing)
         local x = (col == 1) and leftColX or rightColX
         local y = startY + (row - 1) * rowHeight
         local isSelected = (settingsCol == col and settingsRow == row)
@@ -773,7 +1195,8 @@ function drawSettings(W, H)
         if isSelected then
             love.graphics.setColor(0.2, 0.2, 0.3, 0.8)
             love.graphics.rectangle("fill", x - 10, y - 8, colWidth + 20, rowHeight - 20, 8, 8)
-            love.graphics.setColor(1.0, 0.85, 0.2, 0.8)
+            local borderColor = isEditing and {0.4, 1.0, 0.4, 0.9} or {1.0, 0.85, 0.2, 0.8}
+            love.graphics.setColor(borderColor)
             love.graphics.setLineWidth(2)
             love.graphics.rectangle("line", x - 10, y - 8, colWidth + 20, rowHeight - 20, 8, 8)
         end
@@ -785,21 +1208,24 @@ function drawSettings(W, H)
 
         -- Value
         love.graphics.setFont(valueFont)
-        if isOn == nil then
-            -- Custom color (for control scheme)
+        if isEditing then
+            love.graphics.setColor(0.4, 1.0, 0.4)
+        elseif isOn == nil then
             love.graphics.setColor(isSelected and {0.4, 0.9, 1.0} or {0.3, 0.6, 0.7})
         elseif isOn then
             love.graphics.setColor(isSelected and {0.4, 1.0, 0.4} or {0.3, 0.7, 0.3})
         else
             love.graphics.setColor(isSelected and {1.0, 0.5, 0.4} or {0.7, 0.4, 0.3})
         end
-        love.graphics.printf("◀ " .. value .. " ▶", x, y + 24, colWidth, "center")
+
+        local displayValue = isEditing and (value .. "_") or ("◀ " .. value .. " ▶")
+        love.graphics.printf(displayValue, x, y + 20, colWidth, "center")
 
         -- Detail (smaller, below value)
         if detail then
-            love.graphics.setFont(getFont(12))
+            love.graphics.setFont(getFont(11))
             love.graphics.setColor(0.45, 0.45, 0.5)
-            love.graphics.printf(detail, x, y + 52, colWidth, "center")
+            love.graphics.printf(detail, x, y + 44, colWidth, "center")
         end
     end
 
@@ -810,17 +1236,24 @@ function drawSettings(W, H)
     local aa = Config.getAimAssist()
     local di = Config.getDemoInvulnerable()
     local mm = Config.getMusicMuted()
+    local playerName = Config.getPlayerName() or ""
 
     -- Left column
     drawCell(1, 1, "Controls",
         scheme == "wasd" and "WASD" or "Arrows", nil,
-        scheme == "wasd" and "A/D move • Space jump • W cast" or "←/→ move • Enter jump • ↑ cast")
+        scheme == "wasd" and "A/D • Space • W • E" or "←/→ • Enter • ↑ • ↓")
     drawCell(1, 2, "Players",
-        pc .. " Players", pc == 3,
+        pc .. " Players", pc >= 3,
         pc == 2 and "1v1 duel" or "Free-for-all")
     drawCell(1, 3, "Server Mode",
         sm and "ON" or "OFF", sm,
         sm and "Host is relay only" or "Host plays too")
+
+    -- Player Name (row 4, col 1)
+    local nameDisplay = settingsEditingName and settingsNameBuffer or (playerName ~= "" and playerName or "(default)")
+    drawCell(1, 4, "Your Name",
+        nameDisplay, nil,
+        "Shown above your shape", settingsEditingName)
 
     -- Right column
     drawCell(2, 1, "Aim Assist",
@@ -833,16 +1266,13 @@ function drawSettings(W, H)
         mm and "OFF" or "ON", not mm,
         mm and "Music muted" or "Music enabled")
 
-    -- Column indicator
-    love.graphics.setFont(getFont(14))
-    love.graphics.setColor(0.5, 0.5, 0.6)
-    love.graphics.printf("← Left Column", leftColX, startY + 3 * rowHeight + 10, colWidth, "center")
-    love.graphics.printf("Right Column →", rightColX, startY + 3 * rowHeight + 10, colWidth, "center")
-
     -- Instructions
     love.graphics.setFont(getFont(14))
     love.graphics.setColor(0.5, 0.5, 0.5)
-    love.graphics.printf("↑/↓ navigate  •  Tab switch column  •  ←/→ change  •  Backspace/Esc back", 0, H - 50, W, "center")
+    local instructions = settingsEditingName
+        and "Type name • Enter to save • Esc to cancel"
+        or "↑/↓/←/→ navigate  •  Space change  •  Esc back"
+    love.graphics.printf(instructions, 0, H - 50, W, "center")
 end
 
 function drawConnecting(W, H)
@@ -924,6 +1354,9 @@ function startAsHost()
         else
             -- Normal mode: host is P1
             players[1] = Player.new(1, Config.getControls())
+            -- Set player name from config
+            local configName = Config.getPlayerName()
+            if configName then players[1].name = configName end
             for i = 2, maxPlayers do
                 players[i] = Player.new(i, nil)
                 players[i].isRemote = true
@@ -947,9 +1380,12 @@ function startAsClient(address)
     end
 end
 
--- love.textinput for IP address entry
+-- love.textinput for IP address entry and settings name input
 function love.textinput(text)
-    if gameState == "connecting" and not Network.isConnected() then
+    if gameState == "settings" and settingsEditingName then
+        -- Allow typing player name (alphanumeric and common symbols)
+        handleSettingsTextInput(text)
+    elseif gameState == "connecting" and not Network.isConnected() then
         -- Allow typing IP address
         if text:match("[0-9%.a-zA-Z:]") then
             joinAddress = joinAddress .. text
@@ -1023,10 +1459,40 @@ function processNetworkMessages()
         if msg.type == "player_connected" then
             -- A new client connected (host only)
             local connected = Network.getConnectedCount() - 1  -- subtract host
+            -- Mark player as connected in selection
+            if selection then
+                selection:setConnected(msg.playerId, true)
+            end
             if serverMode then
                 menuStatus = "Server mode on " .. Network.getHostAddress() .. ":" .. Network.PORT .. " (" .. connected .. "/" .. maxPlayers .. " players)"
+                -- Send connected players info to the new client
+                for i = 1, maxPlayers do
+                    if selection and selection.connected[i] and i ~= msg.playerId then
+                        Network.sendTo(msg.playerId, "player_status", {pid = i, connected = true}, true)
+                    end
+                end
+                -- Relay to other clients that this player connected
+                Network.relay(msg.playerId, "player_status", {pid = msg.playerId, connected = true}, true)
             else
                 menuStatus = "Player " .. msg.playerId .. " connected (" .. connected .. "/" .. maxPlayers .. ")"
+                -- Send host's name to new player
+                local pid = Network.getLocalPlayerId()
+                if players[pid] then
+                    Network.sendTo(msg.playerId, "player_name", {pid = pid, name = players[pid].name}, true)
+                end
+                -- Also send names and connection status of all other connected players to the new player
+                for i = 1, maxPlayers do
+                    if i ~= msg.playerId then
+                        if selection and selection.connected[i] then
+                            Network.sendTo(msg.playerId, "player_status", {pid = i, connected = true}, true)
+                        end
+                        if i ~= pid and players[i] and players[i].name then
+                            Network.sendTo(msg.playerId, "player_name", {pid = i, name = players[i].name}, true)
+                        end
+                    end
+                end
+                -- Relay to other clients that this player connected
+                Network.relay(msg.playerId, "player_status", {pid = msg.playerId, connected = true}, true)
             end
 
         elseif msg.type == "id_assigned" then
@@ -1041,6 +1507,11 @@ function processNetworkMessages()
             -- Set local player
             players[pid].isRemote = false
             players[pid].controls = Config.getControls()
+            -- Set player name from config
+            local configName = Config.getPlayerName()
+            if configName then players[pid].name = configName end
+            -- Send our name to the server
+            Network.send("player_name", {pid = pid, name = players[pid].name}, true)
 
             -- Save IP to history on successful connection
             if #joinAddress > 0 then
@@ -1059,6 +1530,13 @@ function processNetworkMessages()
             if players[msg.playerId] then
                 players[msg.playerId].life = 0
             end
+            -- Mark player as disconnected in selection
+            if selection then
+                selection:setConnected(msg.playerId, false)
+                selection.confirmed[msg.playerId] = false  -- Also unconfirm
+            end
+            -- Relay to other clients
+            Network.relay(msg.playerId, "player_status", {pid = msg.playerId, connected = false}, true)
 
         elseif msg.type == "disconnected" then
             -- Lost connection to server
@@ -1090,6 +1568,28 @@ function processNetworkMessages()
                 end
             end
 
+        elseif msg.type == "player_status" then
+            -- Player connection status update
+            local data = msg.data
+            if data and data.pid then
+                if selection then
+                    selection:setConnected(data.pid, data.connected == true)
+                end
+            end
+
+        elseif msg.type == "player_name" then
+            -- Remote player sent their name
+            local data = msg.data
+            if data and data.pid and data.name then
+                if players[data.pid] then
+                    players[data.pid].name = data.name
+                end
+                -- Host relays to other clients
+                if Network.getRole() == Network.ROLE_HOST then
+                    Network.relay(data.pid, "player_name", data, true)
+                end
+            end
+
         elseif msg.type == "start_countdown" then
             -- Client received countdown start from host
             local data = msg.data
@@ -1098,20 +1598,53 @@ function processNetworkMessages()
                     players[i]:setShape(data["s" .. i])
                 end
                 Projectiles.clear()
+                Abilities.clear()
+
+                -- Get active players from host (flat keys: apc=count, ap1=pid, ap2=pid, ...)
+                local activePlayers = {}
+                local apc = data.apc
+                if apc and apc > 0 then
+                    for idx = 1, apc do
+                        local pid = data["ap" .. idx]
+                        if pid then
+                            table.insert(activePlayers, pid)
+                        end
+                    end
+                end
+                -- Fallback: find connected players from selection
+                if #activePlayers == 0 then
+                    for i = 1, maxPlayers do
+                        if selection and selection.connected[i] then
+                            table.insert(activePlayers, i)
+                        end
+                    end
+                end
+
+                -- Spawn positions (spread evenly across the stage)
                 local stageLeft = 250
                 local stageRight = 1030
-                if maxPlayers == 2 then
-                    players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
-                    players[2]:spawn(stageRight, Physics.GROUND_Y - players[2].shapeHeight / 2)
+                local stageWidth = stageRight - stageLeft
+                local activeCount = #activePlayers
+
+                if activeCount == 1 then
+                    local pid = activePlayers[1]
+                    players[pid]:spawn((stageLeft + stageRight) / 2, Physics.GROUND_Y - players[pid].shapeHeight / 2)
+                elseif activeCount == 2 then
+                    players[activePlayers[1]]:spawn(stageLeft, Physics.GROUND_Y - players[activePlayers[1]].shapeHeight / 2)
+                    players[activePlayers[2]]:spawn(stageRight, Physics.GROUND_Y - players[activePlayers[2]].shapeHeight / 2)
                 else
-                    local stageMiddle = (stageLeft + stageRight) / 2
-                    players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
-                    players[2]:spawn(stageMiddle, Physics.GROUND_Y - players[2].shapeHeight / 2)
-                    players[3]:spawn(stageRight, Physics.GROUND_Y - players[3].shapeHeight / 2)
+                    for idx, pid in ipairs(activePlayers) do
+                        local t = (idx - 1) / (activeCount - 1)
+                        local x = stageLeft + t * stageWidth
+                        players[pid]:spawn(x, Physics.GROUND_Y - players[pid].shapeHeight / 2)
+                    end
                 end
+
                 countdownTimer = 3.0
                 countdownValue = 3
                 gameState = "countdown"
+                -- Initialize camera to correct position immediately
+                initCamera(players)
             end
 
         elseif msg.type == "game_state" then
@@ -1150,9 +1683,24 @@ function processNetworkMessages()
             -- Remote player cast ability
             local data = msg.data
             if data and data.pid and players[data.pid] then
-                players[data.pid]:castAbilityAtNearest(players)
+                if data.tx and data.ty then
+                    players[data.pid]:castAbilityAt(data.tx, data.ty)
+                else
+                    players[data.pid]:castAbilityAtNearest(players)
+                end
                 if Network.getRole() == Network.ROLE_HOST then
                     Network.relay(data.pid, "player_cast", data, true)
+                end
+            end
+
+        elseif msg.type == "player_special" then
+            -- Remote player used special ability
+            local data = msg.data
+            if data and data.pid and players[data.pid] then
+                local p = players[data.pid]
+                Abilities.cast(p, p.shapeKey, p.facingRight, data.tx, data.ty)
+                if Network.getRole() == Network.ROLE_HOST then
+                    Network.relay(data.pid, "player_special", data, true)
                 end
             end
 
@@ -1180,6 +1728,7 @@ function processNetworkMessages()
             -- Host told us to restart - go back to selection
             winner = nil
             Projectiles.clear()
+            Abilities.clear()
             Lightning.reset()
             Dropbox.reset()
             selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
@@ -1361,6 +1910,11 @@ function applyGameState(data)
     else
         -- Local player: only apply authoritative life/buffs from host
         if data.life ~= nil then
+            -- Show damage number if life decreased
+            if data.life < players[pid].life and players[pid].life > 0 then
+                local dmg = players[pid].life - data.life
+                spawnDamageNumber(players[pid].x, players[pid].y, dmg)
+            end
             players[pid].life = data.life
         end
         if data.armor ~= nil then
@@ -1435,6 +1989,7 @@ function returnToMenu()
     selection = nil
     winner = nil
     Projectiles.clear()
+    Abilities.clear()
     Lightning.reset()
     Dropbox.reset()
     gameState = "menu"
@@ -1473,6 +2028,7 @@ function restartGame()
         -- Networked: stay connected, go back to selection
         winner = nil
         Projectiles.clear()
+        Abilities.clear()
         Lightning.reset()
         Dropbox.reset()
         selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
@@ -1494,6 +2050,7 @@ local function createBotState(playerId)
         playerId = playerId,
         jumpTimer = math.random() * 2 + 0.5,      -- time until next jump
         castTimer = math.random() * 3 + 1,        -- time until next cast
+        specialTimer = math.random() * 6 + 3,     -- time until next special ability
         moveTimer = math.random() * 1.5 + 0.5,    -- time until direction change
         moveDir = math.random() < 0.5 and -1 or 1 -- current move direction
     }
@@ -1515,6 +2072,29 @@ local function updateBotAI(bot, player, dt, allPlayers)
     if bot.castTimer <= 0 then
         player:castAbilityAtNearest(allPlayers)
         bot.castTimer = math.random() * 2 + 0.5  -- 0.5-2.5 seconds between casts
+    end
+
+    -- Random special ability usage
+    bot.specialTimer = bot.specialTimer - dt
+    if bot.specialTimer <= 0 then
+        -- Find nearest enemy for targeting
+        local nearest = nil
+        local nearestDist = math.huge
+        for _, other in ipairs(allPlayers) do
+            if other.id ~= player.id and other.life and other.life > 0 then
+                local dist = math.abs(other.x - player.x)
+                if dist < nearestDist then
+                    nearestDist = dist
+                    nearest = other
+                end
+            end
+        end
+        if nearest and player.shapeKey then
+            local dir = nearest.x > player.x and 1 or -1
+            player.facingRight = (dir == 1)
+            Abilities.cast(player, player.shapeKey, dir > 0, nearest.x, nearest.y)
+        end
+        bot.specialTimer = math.random() * 8 + 4  -- 4-12 seconds between specials
     end
 
     -- Random movement direction changes
@@ -1547,10 +2127,15 @@ function startDemoMode()
     -- Create players: P1 is local human, P2 and P3 are bots
     players = {}
     players[1] = Player.new(1, Config.getControls())
+    -- Set player name from config
+    local configName = Config.getPlayerName()
+    if configName then players[1].name = configName end
     players[2] = Player.new(2, nil)
     players[2].isRemote = false  -- not remote, but AI controlled
+    players[2].name = "Bot 1"
     players[3] = Player.new(3, nil)
     players[3].isRemote = false
+    players[3].name = "Bot 2"
 
     -- Assign random shapes to bots
     local Shapes = require("shapes")
@@ -1574,6 +2159,7 @@ function startDemoMode()
 
     -- Spawn positions
     Projectiles.clear()
+    Abilities.clear()
     local stageLeft = 250
     local stageRight = 1030
     local stageMiddle = (stageLeft + stageRight) / 2
@@ -1587,12 +2173,16 @@ function startDemoMode()
     gameState = "countdown"
     Lightning.reset()
     Dropbox.reset()
+
+    -- Initialize camera to correct position immediately
+    initCamera(players)
 end
 
 -- Restart demo mode
 function restartDemoMode()
     winner = nil
     Projectiles.clear()
+    Abilities.clear()
     Lightning.reset()
     Dropbox.reset()
     startDemoMode()
@@ -1625,20 +2215,24 @@ function updateDemoMode(dt)
     -- Spawn dash impact particles
     for _, impact in ipairs(Physics.consumeDashImpacts()) do
         Projectiles.spawnDashImpact(impact.x, impact.y)
-        screenShakeTimer = 0.15
-        screenShakeIntensity = 4
+        addScreenShake(6, 0.15, 40)
+        addHitPause(0.05)
+        addCameraZoom(1.02, 0.15)
     end
 
     -- Update projectiles
     Projectiles.update(dt, players)
+
+    -- Update special abilities
+    Abilities.update(dt, players)
 
     -- Update lightning
     Lightning.update(dt, players)
 
     -- Screen shake on lightning strike
     if Lightning.consumeStrike() then
-        screenShakeTimer = 0.3
-        screenShakeIntensity = 6
+        addScreenShake(8, 0.3, 25)
+        Background.onLightningStrike()  -- Brighten clouds
     end
 
     -- Update dropboxes
@@ -1650,9 +2244,23 @@ function updateDemoMode(dt)
         if p:consumeDeath() then
             Sounds.play("death")
             Projectiles.spawnDeathExplosion(p.x, p.y, p.shapeKey)
-            screenShakeTimer = 0.4
-            screenShakeIntensity = 8
+            addScreenShake(12, 0.5, 20)
+            addHitPause(0.08)
+            addCameraZoom(1.05, 0.25)
         end
+    end
+
+    -- Continuous aiming: update local player aim position every frame
+    local localPlayer = players[1]  -- In demo mode, P1 is always local
+    if localPlayer and localPlayer.life > 0 then
+        local mx, my = love.mouse.getPosition()
+        local gameX = (mx - offsetX) / scaleX
+        local gameY = (my - offsetY) / scaleY
+        local W, H = GAME_WIDTH, GAME_HEIGHT
+        local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
+        local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
+        localPlayer.aimX = worldX
+        localPlayer.aimY = worldY
     end
 
     -- Check for game over

@@ -13,6 +13,10 @@ Lightning.MAX_INTERVAL = 10        -- maximum seconds between strikes
 Lightning.FLASH_DURATION = 0.5     -- how long the bolt is visible
 Lightning.WARNING_DURATION = 1.0   -- how long the warning indicator shows
 
+-- Callbacks for juice effects (set by main.lua)
+Lightning.onHit = nil           -- function(x, y, damage) called when lightning hits a player
+Lightning.onWarningStart = nil  -- function(x) called when warning appears
+
 local strikes = {}       -- active lightning visual effects
 local nextStrikeTimer = 5 -- countdown to next strike
 local warnings = {}       -- active warning indicators
@@ -69,6 +73,10 @@ function Lightning._spawnStrike(players)
         x = x,
         age = 0
     })
+    -- Notify for sound ramp
+    if Lightning.onWarningStart then
+        Lightning.onWarningStart(x)
+    end
 end
 
 function Lightning._doStrike(x, players)
@@ -89,6 +97,7 @@ function Lightning._doStrike(x, players)
             if player.life and player.life > 0 and not player.invulnerable then
                 local dx = math.abs(player.x - x)
                 if dx <= Lightning.STRIKE_RADIUS then
+                    local prevLife = player.life
                     local dmg = Lightning.DAMAGE
                     -- Armor absorbs damage first
                     if player.armor and player.armor > 0 then
@@ -98,8 +107,14 @@ function Lightning._doStrike(x, players)
                         if player.armor <= 0 then player.armor = 0 end
                     end
                     player.life = math.max(0, player.life - dmg)
+                    local actualDmg = prevLife - player.life
                     player.hitFlash = 0.25
                     Sounds.play("player_hurt")
+
+                    -- Trigger juice callback
+                    if Lightning.onHit and actualDmg > 0 then
+                        Lightning.onHit(player.x, player.y, actualDmg)
+                    end
                 end
             end
         end
@@ -125,17 +140,49 @@ end
 Lightning.generateBoltSegments = Lightning._generateBoltSegments
 
 function Lightning.draw(gameWidth, gameHeight)
-    -- Draw warnings (pulsing circle on ground)
+    -- Draw warnings (enhanced: glowing decal with urgency)
     for _, w in ipairs(warnings) do
-        local pulse = 0.5 + 0.5 * math.sin(w.age * 12)
-        local alpha = 0.3 + 0.4 * pulse
+        local progress = w.age / Lightning.WARNING_DURATION  -- 0 to 1
+        local pulse = 0.5 + 0.5 * math.sin(w.age * 12 * (1 + progress))  -- Faster pulse as it approaches
+        local baseAlpha = 0.3 + 0.5 * progress  -- More intense as strike approaches
+        local alpha = baseAlpha + 0.2 * pulse
+
+        -- Outer danger zone (filled, very faint)
+        local outerRadius = Lightning.STRIKE_RADIUS * (0.6 + 0.4 * progress)
+        love.graphics.setColor(1.0, 0.8, 0.2, alpha * 0.15)
+        love.graphics.circle("fill", w.x, Physics.GROUND_Y, outerRadius)
+
+        -- Pulsing ring (expands as strike approaches)
         love.graphics.setColor(1.0, 1.0, 0.3, alpha)
+        love.graphics.setLineWidth(2 + progress * 2)
+        love.graphics.circle("line", w.x, Physics.GROUND_Y, outerRadius)
+
+        -- Inner bright core (grows with urgency)
+        local innerRadius = 8 + 15 * progress
+        love.graphics.setColor(1.0, 1.0, 0.6, alpha * 0.8)
+        love.graphics.circle("fill", w.x, Physics.GROUND_Y, innerRadius)
+
+        -- Electric sparks / mini arcs around the warning zone
+        love.graphics.setColor(1.0, 1.0, 0.8, alpha * 0.7)
+        love.graphics.setLineWidth(1)
+        local numSparks = math.floor(3 + 5 * progress)
+        local time = love.timer.getTime()
+        for i = 1, numSparks do
+            local angle = (i / numSparks) * math.pi * 2 + time * 3 + w.age * 10
+            local sparkDist = outerRadius * (0.7 + 0.3 * math.sin(time * 20 + i * 2))
+            local x1 = w.x + math.cos(angle) * sparkDist * 0.6
+            local y1 = Physics.GROUND_Y + math.sin(angle) * sparkDist * 0.3
+            local x2 = w.x + math.cos(angle + 0.3) * sparkDist
+            local y2 = Physics.GROUND_Y + math.sin(angle + 0.3) * sparkDist * 0.3
+            love.graphics.line(x1, y1, x2, y2)
+        end
+
+        -- Crosshair (bigger and brighter as strike approaches)
+        local crossSize = 12 + 8 * progress
+        love.graphics.setColor(1.0, 1.0, 0.0, alpha * 0.8)
         love.graphics.setLineWidth(2)
-        love.graphics.circle("line", w.x, Physics.GROUND_Y, Lightning.STRIKE_RADIUS * (0.5 + 0.5 * (w.age / Lightning.WARNING_DURATION)))
-        -- Small crosshair
-        love.graphics.setColor(1.0, 1.0, 0.0, alpha * 0.6)
-        love.graphics.line(w.x - 10, Physics.GROUND_Y, w.x + 10, Physics.GROUND_Y)
-        love.graphics.line(w.x, Physics.GROUND_Y - 10, w.x, Physics.GROUND_Y + 10)
+        love.graphics.line(w.x - crossSize, Physics.GROUND_Y, w.x + crossSize, Physics.GROUND_Y)
+        love.graphics.line(w.x, Physics.GROUND_Y - crossSize, w.x, Physics.GROUND_Y + crossSize)
     end
 
     -- Draw active bolts
