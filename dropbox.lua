@@ -241,6 +241,7 @@ end
 local CHARGE_TYPES = { "health", "health", "armor", "damage" }  -- health is more common
 
 function Dropbox._spawnCharge(x, y)
+    if #CHARGE_TYPES == 0 then return end  -- Safety check
     local kind = CHARGE_TYPES[math.random(#CHARGE_TYPES)]
     local charge = {
         x = x,

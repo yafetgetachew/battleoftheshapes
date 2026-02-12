@@ -109,6 +109,10 @@ local countdownValue = 3
 local restartTimer = nil
 local networkSyncTimer = 0
 local TICK_RATE = Network.TICK_RATE
+-- Validate TICK_RATE to prevent infinite loops
+if not TICK_RATE or TICK_RATE <= 0 then
+    TICK_RATE = 1/30  -- Default to 30 ticks per second
+end
 local processNetworkMessages, sendGameState, startCountdown, checkGameOver, restartGame
 
 -- ─────────────────────────────────────────────
@@ -150,9 +154,6 @@ function initServer()
     log("========================================")
     return true
 end
-
--- Forward declarations
-local processNetworkMessages, sendGameState, checkGameOver, startCountdown
 
 -- ─────────────────────────────────────────────
 -- love.load
@@ -226,14 +227,14 @@ function love.update(dt)
         checkGameOver()
 
     elseif gameState == "gameover" then
-	        -- Auto-restart after a delay (non-blocking)
-	        if restartTimer ~= nil then
-	            restartTimer = restartTimer - dt
-	            if restartTimer <= 0 then
-	                restartTimer = nil
-	                restartGame()
-	            end
-	        end
+        -- Auto-restart after a delay (non-blocking)
+        if restartTimer ~= nil then
+            restartTimer = restartTimer - dt
+            if restartTimer <= 0 then
+                restartTimer = nil
+                restartGame()
+            end
+        end
     end
 end
 
@@ -527,8 +528,8 @@ checkGameOver = function()
         end
         gameState = "gameover"
         Network.send("game_over", {winner = winner}, true)
-	        -- Auto-restart after 5 seconds (handled in love.update so we don't block networking)
-	        restartTimer = 5
+        -- Auto-restart after 5 seconds (handled in love.update so we don't block networking)
+        restartTimer = 5
     end
 end
 

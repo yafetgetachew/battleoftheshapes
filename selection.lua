@@ -116,15 +116,18 @@ end
 
 function Selection:isDone()
     -- Only check connected players - all connected must be confirmed
+    -- Returns done status AND the connected count to prevent race conditions
     local connectedCount = 0
+    local allConfirmed = true
     for i = 1, self.playerCount do
         if self.connected[i] then
             connectedCount = connectedCount + 1
-            if not self.confirmed[i] then return false end
+            if not self.confirmed[i] then allConfirmed = false end
         end
     end
-    -- Need at least 2 connected players to start
-    return connectedCount >= 2
+    -- Need at least 2 connected players to start, and all must be confirmed
+    local isDone = connectedCount >= 2 and allConfirmed
+    return isDone, connectedCount
 end
 
 function Selection:getChoices()
