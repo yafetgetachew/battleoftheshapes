@@ -89,6 +89,11 @@ function Network.getConnectedCount()
     return 0
 end
 
+-- Returns the peers table (playerId -> peer) for iteration by the host
+function Network.getConnectedPeers()
+    return peers
+end
+
 function Network.startHost(playerCount, isServerMode)
     maxPlayers = playerCount or 3
     dedicatedServer = isServerMode or false
@@ -152,6 +157,192 @@ function Network.stop()
     incomingMessages = {}
 end
 
+-- ─────────────────────────────────────────────
+-- Compact binary-ish encoding for high-frequency messages
+-- Reduces 14 messages/tick → 1, and ~1400 bytes → ~400 bytes
+-- ─────────────────────────────────────────────
+
+-- Send a pre-encoded raw string (bypasses encodeMessage)
+function Network.sendRaw(rawStr, reliable)
+    local flag = reliable and "reliable" or "unreliable"
+    if role == Network.ROLE_HOST then
+        for _, peer in pairs(peers) do peer:send(rawStr, 0, flag) end
+    elseif role == Network.ROLE_CLIENT and serverPeer then
+        serverPeer:send(rawStr, 0, flag)
+    end
+end
+
+-- Encode all game state into a single compact tick message
+-- Format: T;pid,x,y,vx,vy,life,will,f,a,db,ds;...;L,sc,wc,nt,s1x,s1a,...,w1x,w1a,...;D,bc,cc,st,b1x,b1y,b1vx,b1vy,b1og,...,c1x,c1y,c1a,c1k,...
+function Network.encodeTick(playerStates, lightningState, dropboxState)
+    local parts = {"T"}
+
+    -- Player sections (only alive players)
+    for _, ps in ipairs(playerStates) do
+        parts[#parts + 1] = ps.pid .. "," .. ps.x .. "," .. ps.y .. ","
+            .. ps.vx .. "," .. ps.vy .. "," .. ps.life .. "," .. ps.will .. ","
+            .. ps.facing .. "," .. (ps.armor and 1 or 0) .. ","
+            .. (ps.dmgBoost and 1 or 0) .. "," .. (ps.dmgShots or 0)
+    end
+
+    -- Lightning section
+    local ls = lightningState
+    local lparts = {"L", ls.sc or 0, ls.wc or 0, ls.nt or 5}
+    if ls.strikes then
+        for _, s in ipairs(ls.strikes) do
+            lparts[#lparts + 1] = s.x
+            lparts[#lparts + 1] = s.age
+        end
+    end
+    if ls.warnings then
+        for _, w in ipairs(ls.warnings) do
+            lparts[#lparts + 1] = w.x
+            lparts[#lparts + 1] = w.age
+        end
+    end
+    parts[#parts + 1] = table.concat(lparts, ",")
+
+    -- Dropbox section
+    local ds = dropboxState
+    local dparts = {"D", ds.bc or 0, ds.cc or 0, ds.st or 10}
+    if ds.boxes then
+        for _, b in ipairs(ds.boxes) do
+            dparts[#dparts + 1] = b.x
+            dparts[#dparts + 1] = b.y
+            dparts[#dparts + 1] = b.vx
+            dparts[#dparts + 1] = b.vy
+            dparts[#dparts + 1] = b.og
+        end
+    end
+    if ds.charges then
+        for _, c in ipairs(ds.charges) do
+            dparts[#dparts + 1] = c.x
+            dparts[#dparts + 1] = c.y
+            dparts[#dparts + 1] = c.age
+            dparts[#dparts + 1] = c.kind
+        end
+    end
+    parts[#parts + 1] = table.concat(dparts, ",")
+
+    return table.concat(parts, ";")
+end
+
+-- Decode a compact tick message
+function Network.decodeTick(raw)
+    local sections = {}
+    for section in raw:gmatch("[^;]+") do
+        sections[#sections + 1] = section
+    end
+    -- sections[1] = "T" (prefix)
+    local playerStates = {}
+    local lightningState = {}
+    local dropboxState = {}
+
+    for i = 2, #sections do
+        local sec = sections[i]
+        local firstChar = sec:sub(1, 1)
+        if firstChar == "L" then
+            -- Lightning: L,sc,wc,nt,s1x,s1a,...,w1x,w1a,...
+            local vals = {}
+            for v in sec:gmatch("[^,]+") do vals[#vals + 1] = v end
+            local sc = tonumber(vals[2]) or 0
+            local wc = tonumber(vals[3]) or 0
+            local nt = tonumber(vals[4]) or 5
+            local strikes = {}
+            local idx = 5
+            for s = 1, sc do
+                strikes[s] = {
+                    x = tonumber(vals[idx]) or 0,
+                    age = tonumber(vals[idx + 1]) or 0
+                }
+                idx = idx + 2
+            end
+            local warnings = {}
+            for w = 1, wc do
+                warnings[w] = {
+                    x = tonumber(vals[idx]) or 0,
+                    age = tonumber(vals[idx + 1]) or 0
+                }
+                idx = idx + 2
+            end
+            lightningState = {sc = sc, wc = wc, nt = nt, strikes = strikes, warnings = warnings}
+        elseif firstChar == "D" then
+            -- Dropbox: D,bc,cc,st,b1x,b1y,b1vx,b1vy,b1og,...,c1x,c1y,c1a,c1k,...
+            local vals = {}
+            for v in sec:gmatch("[^,]+") do vals[#vals + 1] = v end
+            local bc = tonumber(vals[2]) or 0
+            local cc = tonumber(vals[3]) or 0
+            local st = tonumber(vals[4]) or 10
+            local boxes = {}
+            local idx = 5
+            for b = 1, bc do
+                boxes[b] = {
+                    x = tonumber(vals[idx]) or 0,
+                    y = tonumber(vals[idx + 1]) or 0,
+                    vx = tonumber(vals[idx + 2]) or 0,
+                    vy = tonumber(vals[idx + 3]) or 0,
+                    onGround = (tonumber(vals[idx + 4]) or 0) == 1
+                }
+                idx = idx + 5
+            end
+            local charges = {}
+            for c = 1, cc do
+                charges[c] = {
+                    x = tonumber(vals[idx]) or 0,
+                    y = tonumber(vals[idx + 1]) or 0,
+                    age = tonumber(vals[idx + 2]) or 0,
+                    kind = vals[idx + 3] or "health"
+                }
+                idx = idx + 4
+            end
+            dropboxState = {bc = bc, cc = cc, st = st, boxes = boxes, charges = charges}
+        else
+            -- Player: pid,x,y,vx,vy,life,will,f,a,db,ds
+            local vals = {}
+            for v in sec:gmatch("[^,]+") do vals[#vals + 1] = v end
+            if #vals >= 11 then
+                playerStates[#playerStates + 1] = {
+                    pid = tonumber(vals[1]),
+                    x = tonumber(vals[2]),
+                    y = tonumber(vals[3]),
+                    vx = tonumber(vals[4]),
+                    vy = tonumber(vals[5]),
+                    life = tonumber(vals[6]),
+                    will = tonumber(vals[7]),
+                    facing = tonumber(vals[8]),
+                    armor = tonumber(vals[9]) == 1,
+                    dmgBoost = tonumber(vals[10]) == 1,
+                    dmgShots = tonumber(vals[11]) or 0
+                }
+            end
+        end
+    end
+
+    return playerStates, lightningState, dropboxState
+end
+
+-- Encode compact client state: C;pid,x,y,vx,vy,facing
+function Network.encodeClientState(pid, x, y, vx, vy, facing)
+    return "C;" .. pid .. "," .. x .. "," .. y .. "," .. vx .. "," .. vy .. "," .. facing
+end
+
+-- Decode compact client state
+function Network.decodeClientState(raw)
+    -- Skip "C;" prefix
+    local body = raw:sub(3)
+    local vals = {}
+    for v in body:gmatch("[^,]+") do vals[#vals + 1] = v end
+    if #vals < 6 then return nil end
+    return {
+        pid = tonumber(vals[1]),
+        x = tonumber(vals[2]),
+        y = tonumber(vals[3]),
+        vx = tonumber(vals[4]),
+        vy = tonumber(vals[5]),
+        facing = tonumber(vals[6])
+    }
+end
+
 function Network.send(msgType, data, reliable)
     local encoded = encodeMessage(msgType, data)
     local flag = reliable and "reliable" or "unreliable"
@@ -207,20 +398,34 @@ function Network.update(dt)
                 table.insert(incomingMessages, {type = "connected"})
             end
         elseif event.type == "receive" then
-            local msgType, data = decodeMessage(event.data)
-            if msgType then
-                if role == Network.ROLE_CLIENT and msgType == "assign_id" then
-                    localPlayerId = data.id
-                    maxPlayers = data.maxPlayers or 3
-                    table.insert(incomingMessages, {type = "id_assigned", playerId = data.id, maxPlayers = data.maxPlayers or 3})
-                elseif role == Network.ROLE_CLIENT and msgType == "server_full" then
-                    table.insert(incomingMessages, {type = "server_full"})
-                else
-                    local fromId = nil
-                    if role == Network.ROLE_HOST then
-                        fromId = peerToId[event.peer]
+            local raw = event.data
+            local prefix = raw:sub(1, 2)
+            if prefix == "T;" then
+                -- Compact tick message from host
+                table.insert(incomingMessages, {type = "tick", raw = raw})
+            elseif prefix == "C;" then
+                -- Compact client state from a client
+                local fromId = nil
+                if role == Network.ROLE_HOST then
+                    fromId = peerToId[event.peer]
+                end
+                table.insert(incomingMessages, {type = "client_state_compact", raw = raw, fromPlayerId = fromId})
+            else
+                local msgType, data = decodeMessage(raw)
+                if msgType then
+                    if role == Network.ROLE_CLIENT and msgType == "assign_id" then
+                        localPlayerId = data.id
+                        maxPlayers = data.maxPlayers or 3
+                        table.insert(incomingMessages, {type = "id_assigned", playerId = data.id, maxPlayers = data.maxPlayers or 3})
+                    elseif role == Network.ROLE_CLIENT and msgType == "server_full" then
+                        table.insert(incomingMessages, {type = "server_full"})
+                    else
+                        local fromId = nil
+                        if role == Network.ROLE_HOST then
+                            fromId = peerToId[event.peer]
+                        end
+                        table.insert(incomingMessages, {type = msgType, data = data, fromPlayerId = fromId})
                     end
-                    table.insert(incomingMessages, {type = msgType, data = data, fromPlayerId = fromId})
                 end
             end
         elseif event.type == "disconnect" then

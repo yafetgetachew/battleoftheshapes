@@ -1647,17 +1647,44 @@ function processNetworkMessages()
                 initCamera(players)
             end
 
-        elseif msg.type == "game_state" then
-            -- Client receives authoritative game state from host
-            local data = msg.data
-            if data then
-                applyGameState(data)
+        elseif msg.type == "tick" then
+            -- Client receives compact batched game state from host
+            if Network.getRole() == Network.ROLE_CLIENT then
+                local playerStates, lightningData, dropboxData = Network.decodeTick(msg.raw)
+                -- Apply player states
+                for _, ps in ipairs(playerStates) do
+                    applyGameState(ps)
+                end
+                -- Apply lightning state
+                if lightningData and lightningData.sc ~= nil then
+                    local strikes = {}
+                    for i, s in ipairs(lightningData.strikes or {}) do
+                        strikes[i] = {
+                            x = s.x,
+                            age = s.age,
+                            segments = Lightning.generateBoltSegments(s.x)
+                        }
+                    end
+                    Lightning.setState({
+                        strikes = strikes,
+                        warnings = lightningData.warnings or {},
+                        nextStrikeTimer = lightningData.nt or 5
+                    })
+                end
+                -- Apply dropbox state
+                if dropboxData and dropboxData.bc ~= nil then
+                    Dropbox.setState({
+                        boxes = dropboxData.boxes or {},
+                        charges = dropboxData.charges or {},
+                        spawnTimer = dropboxData.st or 10
+                    })
+                end
             end
 
-        elseif msg.type == "client_state" then
-            -- Host receives a client's player state
+        elseif msg.type == "client_state_compact" then
+            -- Host receives compact client state
             if Network.getRole() == Network.ROLE_HOST then
-                local data = msg.data
+                local data = Network.decodeClientState(msg.raw)
                 if data and data.pid and players[data.pid] and players[data.pid].isRemote then
                     players[data.pid]:applyNetState({
                         x = data.x, y = data.y,
@@ -1731,88 +1758,30 @@ function processNetworkMessages()
             Abilities.clear()
             Lightning.reset()
             Dropbox.reset()
+            -- Preserve player names
+            local savedNames = {}
+            for i = 1, maxPlayers do
+                if players[i] and players[i].name then
+                    savedNames[i] = players[i].name
+                end
+            end
+            for i = 1, maxPlayers do
+                if players[i] then
+                    players[i]:setShape(nil)
+                    players[i].life = 0
+                    if savedNames[i] then
+                        players[i].name = savedNames[i]
+                    end
+                end
+            end
             selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
+            -- player_status messages from host will re-mark connected players
             gameState = "selection"
 
-        elseif msg.type == "lightning_sync" then
-            -- Client receives consolidated lightning state from host
-            if Network.getRole() == Network.ROLE_CLIENT then
-                local data = msg.data
-                if data then
-                    local strikes = {}
-                    local warnings = {}
-                    local sc = data.sc or 0
-                    local wc = data.wc or 0
-                    for i = 1, sc do
-                        local sx = data["s" .. i .. "x"]
-                        local sa = data["s" .. i .. "a"]
-                        if sx then
-                            strikes[i] = {
-                                x = sx,
-                                age = sa or 0,
-                                segments = Lightning.generateBoltSegments(sx)
-                            }
-                        end
-                    end
-                    for i = 1, wc do
-                        local wx = data["w" .. i .. "x"]
-                        local wa = data["w" .. i .. "a"]
-                        if wx then
-                            warnings[i] = {
-                                x = wx,
-                                age = wa or 0
-                            }
-                        end
-                    end
-                    Lightning.setState({
-                        strikes = strikes,
-                        warnings = warnings,
-                        nextStrikeTimer = data.nt or 5
-                    })
-                end
-            end
-
-        elseif msg.type == "dropbox_sync" then
-            -- Client receives dropbox state from host
-            if Network.getRole() == Network.ROLE_CLIENT then
-                local data = msg.data
-                if data then
-                    local newBoxes = {}
-                    local newCharges = {}
-                    local bc = data.bc or 0
-                    local cc = data.cc or 0
-                    for i = 1, bc do
-                        local bx = data["b" .. i .. "x"]
-                        local by = data["b" .. i .. "y"]
-                        if bx and by then
-                            newBoxes[i] = {
-                                x = bx,
-                                y = by,
-                                vx = data["b" .. i .. "vx"] or 0,
-                                vy = data["b" .. i .. "vy"] or 0,
-                                onGround = (data["b" .. i .. "og"] or 0) == 1
-                            }
-                        end
-                    end
-                    for i = 1, cc do
-                        local cx = data["c" .. i .. "x"]
-                        local cy = data["c" .. i .. "y"]
-                        if cx and cy then
-                            newCharges[i] = {
-                                x = cx,
-                                y = cy,
-                                age = data["c" .. i .. "a"] or 0,
-                                kind = data["c" .. i .. "k"] or "health"
-                            }
-                        end
-                    end
-                    Dropbox.setState({
-                        boxes = newBoxes,
-                        charges = newCharges,
-                        spawnTimer = data.st or 10
-                    })
-                end
-            end
+        elseif msg.type == "game_state" then
+            -- Legacy: individual player state (backward compat)
+            local data = msg.data
+            if data then applyGameState(data) end
         end
     end
 end
@@ -1821,74 +1790,73 @@ end
 -- Game state sync (host → clients)
 -- ─────────────────────────────────────────────
 function sendGameState()
+    -- Collect player states (only alive players)
+    local playerStates = {}
     for i, p in ipairs(players) do
-        local state = p:getNetState()
-        Network.send("game_state", {
-            pid = i,
-            x = state.x, y = state.y,
-            vx = state.vx, vy = state.vy,
-            life = state.life, will = state.will,
-            facing = state.facingRight and 1 or 0,
-            armor = state.armor,
-            dmgBoost = state.damageBoost,
-            dmgShots = state.damageBoostShots
-        }, false)
+        if p.life > 0 then
+            local state = p:getNetState()
+            playerStates[#playerStates + 1] = {
+                pid = i,
+                x = state.x, y = state.y,
+                vx = state.vx, vy = state.vy,
+                life = state.life, will = state.will,
+                facing = state.facingRight and 1 or 0,
+                armor = state.armor,
+                dmgBoost = state.damageBoost,
+                dmgShots = state.damageBoostShots or 0
+            }
+        end
     end
 
-    -- Send lightning state to clients (single consolidated message)
-    local lightningState = Lightning.getState()
-    local ldata = {
-        sc = #lightningState.strikes,
-        wc = #lightningState.warnings,
-        nt = lightningState.nextStrikeTimer
+    -- Collect lightning state
+    local ls = Lightning.getState()
+    local lightningData = {
+        sc = #ls.strikes, wc = #ls.warnings, nt = ls.nextStrikeTimer,
+        strikes = {}, warnings = {}
     }
-    for i, strike in ipairs(lightningState.strikes) do
-        ldata["s" .. i .. "x"] = strike.x
-        ldata["s" .. i .. "a"] = strike.age
+    for i, strike in ipairs(ls.strikes) do
+        lightningData.strikes[i] = {x = strike.x, age = strike.age}
     end
-    for i, warning in ipairs(lightningState.warnings) do
-        ldata["w" .. i .. "x"] = warning.x
-        ldata["w" .. i .. "a"] = warning.age
+    for i, warning in ipairs(ls.warnings) do
+        lightningData.warnings[i] = {x = warning.x, age = warning.age}
     end
-    Network.send("lightning_sync", ldata, false)
 
-    -- Send dropbox state to clients (single consolidated message)
-    local dropboxState = Dropbox.getState()
-    local ddata = {
-        bc = #dropboxState.boxes,
-        cc = #dropboxState.charges,
-        st = dropboxState.spawnTimer
+    -- Collect dropbox state
+    local ds = Dropbox.getState()
+    local dropboxData = {
+        bc = #ds.boxes, cc = #ds.charges, st = ds.spawnTimer,
+        boxes = {}, charges = {}
     }
-    for i, box in ipairs(dropboxState.boxes) do
-        ddata["b" .. i .. "x"] = box.x
-        ddata["b" .. i .. "y"] = box.y
-        ddata["b" .. i .. "vx"] = box.vx
-        ddata["b" .. i .. "vy"] = box.vy
-        ddata["b" .. i .. "og"] = box.onGround and 1 or 0
+    for i, box in ipairs(ds.boxes) do
+        dropboxData.boxes[i] = {
+            x = box.x, y = box.y,
+            vx = box.vx, vy = box.vy,
+            og = box.onGround and 1 or 0
+        }
     end
-    for i, charge in ipairs(dropboxState.charges) do
-        ddata["c" .. i .. "x"] = charge.x
-        ddata["c" .. i .. "y"] = charge.y
-        ddata["c" .. i .. "a"] = charge.age
-        ddata["c" .. i .. "k"] = charge.kind or "health"
+    for i, charge in ipairs(ds.charges) do
+        dropboxData.charges[i] = {
+            x = charge.x, y = charge.y,
+            age = charge.age, kind = charge.kind or "health"
+        }
     end
-    Network.send("dropbox_sync", ddata, false)
+
+    -- Send everything in one compact message
+    local encoded = Network.encodeTick(playerStates, lightningData, dropboxData)
+    Network.sendRaw(encoded, false)
 end
 
--- Client sends its own player state to the host
+-- Client sends its own player state to the host (compact)
 function sendClientState()
     local pid = Network.getLocalPlayerId()
     local p = players[pid]
     if not p then return end
     local state = p:getNetState()
-    -- Client only sends position/velocity/facing; host is authoritative for
-    -- life, will, armor, and damage boost.
-    Network.send("client_state", {
-        pid = pid,
-        x = state.x, y = state.y,
-        vx = state.vx, vy = state.vy,
-        facing = state.facingRight and 1 or 0
-    }, false)
+    local encoded = Network.encodeClientState(
+        pid, state.x, state.y, state.vx, state.vy,
+        state.facingRight and 1 or 0
+    )
+    Network.sendRaw(encoded, false)
 end
 
 function applyGameState(data)
@@ -2031,12 +1999,40 @@ function restartGame()
         Abilities.clear()
         Lightning.reset()
         Dropbox.reset()
-        selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
-        gameState = "selection"
-        -- Host tells clients to restart
-        if Network.getRole() == Network.ROLE_HOST then
-            Network.send("game_restart", {}, true)
+
+        -- Preserve player names across restart
+        local savedNames = {}
+        for i = 1, maxPlayers do
+            if players[i] and players[i].name then
+                savedNames[i] = players[i].name
+            end
         end
+        for i = 1, maxPlayers do
+            if players[i] then
+                players[i]:setShape(nil)
+                players[i].life = 0
+                if savedNames[i] then
+                    players[i].name = savedNames[i]
+                end
+            end
+        end
+
+        selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
+
+        -- Re-mark connected players in the new selection
+        if Network.getRole() == Network.ROLE_HOST then
+            -- Host: re-mark self + all connected peers
+            for pid, _ in pairs(Network.getConnectedPeers()) do
+                selection:setConnected(pid, true)
+            end
+            Network.send("game_restart", {}, true)
+            -- Send player_status for all connected players so clients know who's here
+            for pid, _ in pairs(Network.getConnectedPeers()) do
+                Network.send("player_status", {pid = pid, connected = true}, true)
+            end
+        end
+
+        gameState = "selection"
     end
 end
 
