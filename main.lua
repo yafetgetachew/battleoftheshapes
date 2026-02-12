@@ -14,6 +14,7 @@ local Sounds      = require("sounds")
 local Config      = require("config")
 local Dropbox     = require("dropbox")
 local Background  = require("background")
+local Map         = require("map")
 
 -- Game states: "splash", "menu", "settings", "connecting", "selection", "countdown", "playing", "gameover"
 -- (Note: "browsing" state was removed - use "Join by IP" instead)
@@ -485,6 +486,23 @@ function love.update(dt)
                 end
             end
 
+            -- Continuous aiming: update local player aim position every frame
+            local localPlayer = getLocalPlayer()
+            if localPlayer and localPlayer.life > 0 then
+                 local mx, my = love.mouse.getPosition()
+                 local gameX = (mx - offsetX) / scaleX
+                 local gameY = (my - offsetY) / scaleY
+                 local W, H = GAME_WIDTH, GAME_HEIGHT
+                 local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
+                 local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
+                 localPlayer.aimX = worldX
+                 localPlayer.aimY = worldY
+                 -- DEBUG: Print aim coords periodically
+                 if math.random() < 0.01 then
+                     print("Main: Player " .. localPlayer.id .. " aim set to " .. math.floor(worldX) .. ", " .. math.floor(worldY))
+                 end
+            end
+
             -- Check for game over (last player standing)
             checkGameOver()
         end
@@ -573,8 +591,10 @@ function love.draw()
         -- ── Sky gradient ──
         drawBackground(W, H)
 
+
         -- ── Ground ──
         drawGround(W, H)
+
 
         -- Apply camera transform for game world elements
         love.graphics.push()
@@ -582,6 +602,9 @@ function love.draw()
         love.graphics.translate(W/2, H/2)
         love.graphics.scale(cameraZoom, cameraZoom)
         love.graphics.translate(-W/2 - cameraX, -H/2 - cameraY)
+
+        -- ── Platforms ──
+        Map.draw()
 
         -- ── Player shadows ──
         for _, p in ipairs(players) do p:drawShadow() end
@@ -723,24 +746,47 @@ function love.keypressed(key)
                 end
             end
             if key == localPlayer.controls.jump then
-                if localPlayer.onGround then
+                if localPlayer:jump() then
                     Sounds.play("jump")
-                end
-                localPlayer:jump()
-                if Network.getRole() ~= Network.ROLE_NONE then
-                    Network.send("player_jump", {pid = localPlayer.id}, true)
+                    if Network.getRole() ~= Network.ROLE_NONE then
+                        Network.send("player_jump", {pid = localPlayer.id}, true)
+                    end
                 end
             end
             if key == localPlayer.controls.cast then
-                localPlayer:castAbilityAtNearest(players)
+                -- Mouse aiming
+                local mx, my = love.mouse.getPosition()
+                -- Inverse camera transform:
+                -- Screen -> Translate(-offsetX, -offsetY) -> Scale(1/scale) -> Translate(camX, camY) -> Translate(-W/2, -H/2) -> Scale(1/zoom) -> Translate(W/2, H/2)
+                -- Actually easier: World = (Screen - Center) / Zoom + Center + Camera - Offset
+                
+                -- Step 1: Undo letterboxing/scaling
+                local gameX = (mx - offsetX) / scaleX
+                local gameY = (my - offsetY) / scaleY
+                
+                -- Step 2: Undo camera zoom/pan
+                local W, H = GAME_WIDTH, GAME_HEIGHT
+                local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
+                local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
+
+                localPlayer:castAbilityAt(worldX, worldY)
+
                 if Network.getRole() ~= Network.ROLE_NONE then
-                    Network.send("player_cast", {pid = localPlayer.id}, true)
+                    Network.send("player_cast", {pid = localPlayer.id, tx = worldX, ty = worldY}, true)
                 end
             end
             if key == localPlayer.controls.special then
-                if Abilities.cast(localPlayer, localPlayer.shapeKey, localPlayer.facingRight) then
+                -- Mouse aiming for special ability
+                local mx, my = love.mouse.getPosition()
+                local gameX = (mx - offsetX) / scaleX
+                local gameY = (my - offsetY) / scaleY
+                local W, H = GAME_WIDTH, GAME_HEIGHT
+                local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
+                local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
+
+                if Abilities.cast(localPlayer, localPlayer.shapeKey, localPlayer.facingRight, worldX, worldY) then
                     if Network.getRole() ~= Network.ROLE_NONE then
-                        Network.send("player_special", {pid = localPlayer.id}, true)
+                        Network.send("player_special", {pid = localPlayer.id, tx = worldX, ty = worldY}, true)
                     end
                 end
             end
@@ -753,6 +799,26 @@ function love.keypressed(key)
         end
     end
 end
+
+-- ─────────────────────────────────────────────
+-- love.keyreleased
+-- ─────────────────────────────────────────────
+function love.keyreleased(key)
+    if gameState == "playing" then
+         local pid = Network.getLocalPlayerId()
+         if pid and players[pid] and not players[pid].isRemote then
+             local p = players[pid]
+             if p.controls and key == p.controls.jump then
+                 p:stopJump()
+                 if Network.getRole() ~= Network.ROLE_NONE then
+                    -- Optional: Send network event for jump stop if needed for precise sync
+                    -- Network.send("player_stop_jump", {pid = p.id}, true)
+                 end
+             end
+         end
+    end
+end
+
 
 -- ─────────────────────────────────────────────
 -- Helper: Transition from selection → countdown
@@ -1430,7 +1496,11 @@ function processNetworkMessages()
             -- Remote player cast ability
             local data = msg.data
             if data and data.pid and players[data.pid] then
-                players[data.pid]:castAbilityAtNearest(players)
+                if data.tx and data.ty then
+                    players[data.pid]:castAbilityAt(data.tx, data.ty)
+                else
+                    players[data.pid]:castAbilityAtNearest(players)
+                end
                 if Network.getRole() == Network.ROLE_HOST then
                     Network.relay(data.pid, "player_cast", data, true)
                 end
@@ -1441,7 +1511,7 @@ function processNetworkMessages()
             local data = msg.data
             if data and data.pid and players[data.pid] then
                 local p = players[data.pid]
-                Abilities.cast(p, p.shapeKey, p.facingRight)
+                Abilities.cast(p, p.shapeKey, p.facingRight, data.tx, data.ty)
                 if Network.getRole() == Network.ROLE_HOST then
                     Network.relay(data.pid, "player_special", data, true)
                 end

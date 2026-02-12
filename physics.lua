@@ -3,6 +3,7 @@
 
 local Sounds  = require("sounds")
 local Network = require("network")
+local Map     = require("map")
 
 local Physics = {}
 
@@ -54,6 +55,39 @@ function Physics.resolveWalls(player)
     elseif player.x + halfW > Physics.WALL_RIGHT then
         player.x = Physics.WALL_RIGHT - halfW
         player.vx = 0
+    end
+end
+
+-- Resolve collisions with map platforms (one-way from bottom)
+function Physics.resolveMapCollisions(player, dt)
+    -- Only check if falling
+    if player.vy < 0 then return end
+    
+    local footerY = player.y + player.shapeHeight / 2
+    local prevY = player.y - player.vy * dt
+    local prevFooterY = prevY + player.shapeHeight / 2
+    local halfW = player.shapeWidth / 2
+    
+    for _, plat in ipairs(Map.platforms) do
+        -- Horizontal overlap test
+        if player.x + halfW > plat.x - plat.w/2 and 
+           player.x - halfW < plat.x + plat.w/2 then
+           
+            -- Vertical check:
+            -- 1. Currently falling through or on the platform
+            -- 2. Was previously above the platform
+            local platTop = plat.y - plat.h/2
+            
+            -- Tolerance window to catch high speed falling
+            -- Check if we crossed the platform TOP edge this frame
+            if prevFooterY <= platTop and footerY >= platTop then
+                player.y = platTop - player.shapeHeight / 2
+                player.vy = 0
+                player.onGround = true
+                -- We found a platform, no need to check others (unless multiple overlapping, but let's assume valid map)
+                return
+            end
+        end
     end
 end
 
@@ -234,6 +268,7 @@ end
 function Physics.updatePlayer(player, dt)
     Physics.applyGravity(player, dt)
     Physics.resolveGround(player)
+    Physics.resolveMapCollisions(player, dt)
     Physics.resolveWalls(player)
 end
 

@@ -42,15 +42,23 @@ local activeLasers = {}       -- Square laser beams
 -- ─────────────────────────────────────────────
 
 -- Square: Laser Beam (hitscan, instant damage over time)
-function Abilities.spawnLaser(caster, facingRight)
+function Abilities.spawnLaser(caster, facingRight, tx, ty)
     if caster.will < Abilities.COSTS.square then return false end
     caster.will = caster.will - Abilities.COSTS.square
     
     local dir = facingRight and 1 or -1
+    local angle = 0
+    if tx and ty then
+        angle = math.atan2(ty - caster.y, tx - caster.x)
+    else
+        angle = (dir == 1) and 0 or math.pi
+    end
+
     local laser = {
         owner = caster.id,
         x = caster.x,
         y = caster.y,
+        angle = angle,
         dir = dir,
         duration = 1.0,      -- 1 second beam
         age = 0,
@@ -115,7 +123,8 @@ function Abilities.spawnBlock(caster, facingRight)
         type = "block",
         owner = caster.id,
         x = caster.x + dir * 100,           -- Spawn in front of player
-        y = Physics.GROUND_Y - blockHeight / 2,  -- Standing on ground
+        groundY = caster.y + caster.shapeHeight / 2, -- Store ground level relative to player
+        y = (caster.y + caster.shapeHeight / 2) - blockHeight / 2,  -- Spawn relative to player's feet
         vx = 150 * dir,                     -- Move forward as it tips
         vy = 0,
         damage = Abilities.DAMAGE.rectangle,
@@ -146,7 +155,8 @@ function Abilities.spawnBoulder(caster, facingRight)
         type = "boulder",
         owner = caster.id,
         x = caster.x + dir * 50,
-        y = Physics.GROUND_Y - 35,  -- On the ground
+        groundY = caster.y + caster.shapeHeight / 2, -- Store ground level relative to player
+        y = (caster.y + caster.shapeHeight / 2) - 35,  -- Spawn relative to player's feet
         vx = 350 * dir,             -- Rolling speed
         vy = 0,
         damage = Abilities.DAMAGE.circle,
@@ -167,9 +177,9 @@ end
 -- ─────────────────────────────────────────────
 -- Cast ability based on shape
 -- ─────────────────────────────────────────────
-function Abilities.cast(caster, shapeKey, facingRight)
+function Abilities.cast(caster, shapeKey, facingRight, tx, ty)
     if shapeKey == "square" then
-        return Abilities.spawnLaser(caster, facingRight)
+        return Abilities.spawnLaser(caster, facingRight, tx, ty)
     elseif shapeKey == "triangle" then
         return Abilities.spawnSpikes(caster, facingRight)
     elseif shapeKey == "rectangle" then
@@ -239,6 +249,17 @@ function Abilities.update(dt, players)
             if p.id == laser.owner then
                 laser.x = p.x
                 laser.y = p.y
+                -- Continuous aiming: update angle from player's current aim
+                if p.aimX and p.aimY and (p.life or 0) > 0 then
+                    -- Only update if aim vector is significant (avoid jitter at 0,0)
+                    if p.aimX ~= 0 or p.aimY ~= 0 then
+                        laser.angle = math.atan2(p.aimY - p.y, p.aimX - p.x)
+                        -- DEBUG: Print updated angle
+                        if math.random() < 0.01 then
+                            print("Abilities: Laser owner " .. p.id .. " aim " .. math.floor(p.aimX) .. "," .. math.floor(p.aimY) .. " -> angle " .. laser.angle)
+                        end
+                    end
+                end
                 break
             end
         end
@@ -257,22 +278,31 @@ function Abilities.update(dt, players)
             -- Check collision with players (damage with cooldown)
             for _, player in ipairs(players) do
                 if player.id ~= laser.owner and (player.life or 0) > 0 then
-                    -- Check if player is in laser path
-                    local laserLeft = laser.dir == 1 and laser.x or (laser.x - laser.width)
-                    local laserRight = laser.dir == 1 and (laser.x + laser.width) or laser.x
-                    local laserTop = laser.y - laser.height / 2
-                    local laserBottom = laser.y + laser.height / 2
+                    -- Check if player is near laser line segment
+                    local px, py = player.x, player.y
+                    local lx1, ly1 = laser.x, laser.y
+                    local lx2 = lx1 + math.cos(laser.angle) * laser.width
+                    local ly2 = ly1 + math.sin(laser.angle) * laser.width
 
-                    local pLeft = player.x - player.shapeWidth / 2
-                    local pRight = player.x + player.shapeWidth / 2
-                    local pTop = player.y - player.shapeHeight / 2
-                    local pBottom = player.y + player.shapeHeight / 2
+                    -- Point to line segment distance
+                    local l2 = (lx2 - lx1)^2 + (ly2 - ly1)^2
+                    if l2 == 0 then l2 = 0.0001 end
+                    local t = ((px - lx1) * (lx2 - lx1) + (py - ly1) * (ly2 - ly1)) / l2
+                    t = math.max(0, math.min(1, t))
+                    local projX = lx1 + t * (lx2 - lx1)
+                    local projY = ly1 + t * (ly2 - ly1)
+                    local distSq = (px - projX)^2 + (py - projY)^2
+                    
+                    -- Player radius estimate (average width/height)
+                    local pRadius = (player.shapeWidth + player.shapeHeight) / 4
+                    local laserRadius = laser.height / 2
 
-                    if pRight > laserLeft and pLeft < laserRight and
-                       pBottom > laserTop and pTop < laserBottom then
+                    if distSq < (pRadius + laserRadius)^2 then
                         -- Apply 1 damage per tick, with 1/30th second cooldown (~30 ticks per second = 30 damage/sec)
                         if not laser.hitCooldown[player.id] then
-                            applyDamage(player, laser.damagePerHit, laser.dir, isAuthority)
+                            -- Hit direction based on laser angle
+                            local hitDir = math.cos(laser.angle) > 0 and 1 or -1
+                            applyDamage(player, laser.damagePerHit, hitDir, isAuthority)
                             laser.hitCooldown[player.id] = 0.033  -- ~30 damage per second
                         end
                     end
@@ -342,7 +372,8 @@ function Abilities.update(dt, players)
         end
 
         -- Check ground collision for legacy falling blocks
-        if not block.rotation and block.y + block.height / 2 >= Physics.GROUND_Y then
+        local groundY = block.groundY or Physics.GROUND_Y
+        if not block.rotation and block.y + block.height / 2 >= groundY then
             Sounds.play("block_land")
             hit = true
         end
@@ -355,7 +386,7 @@ function Abilities.update(dt, players)
                     local blockCenterX, blockCenterY
                     if block.rotation then
                         -- Block pivots from base, calculate swept position
-                        local pivotY = Physics.GROUND_Y
+                        local pivotY = block.groundY or Physics.GROUND_Y
                         local pivotX = block.x - block.dir * block.width / 2
                         -- Tip of block position based on rotation
                         local tipOffsetX = math.sin(block.rotation) * block.height
@@ -442,18 +473,19 @@ function Abilities.draw()
             -- Outer glow
             love.graphics.setColor(1, 0.3, 0.3, alpha * 0.3)
             love.graphics.setLineWidth(pulseWidth + 8)
-            local endX = laser.x + laser.dir * laser.width
-            love.graphics.line(laser.x, laser.y, endX, laser.y)
+            local endX = laser.x + math.cos(laser.angle) * laser.width
+            local endY = laser.y + math.sin(laser.angle) * laser.width
+            love.graphics.line(laser.x, laser.y, endX, endY)
 
             -- Core beam
             love.graphics.setColor(1, 0.5, 0.5, alpha * 0.8)
             love.graphics.setLineWidth(pulseWidth)
-            love.graphics.line(laser.x, laser.y, endX, laser.y)
+            love.graphics.line(laser.x, laser.y, endX, endY)
 
             -- Bright center
             love.graphics.setColor(1, 0.9, 0.9, alpha)
             love.graphics.setLineWidth(pulseWidth * 0.4)
-            love.graphics.line(laser.x, laser.y, endX, laser.y)
+            love.graphics.line(laser.x, laser.y, endX, endY)
         end
     end
 
@@ -484,7 +516,7 @@ function Abilities.draw()
         if block.rotation then
             -- Tipping block: pivot from bottom edge
             local pivotX = block.x - block.dir * block.width / 2
-            local pivotY = Physics.GROUND_Y
+            local pivotY = block.groundY or Physics.GROUND_Y
             love.graphics.translate(pivotX, pivotY)
             love.graphics.rotate(block.rotation)
 
@@ -533,7 +565,8 @@ function Abilities.draw()
     for _, boulder in ipairs(activeBoulders) do
         -- Shadow
         love.graphics.setColor(0, 0, 0, 0.3)
-        love.graphics.ellipse("fill", boulder.x + 4, Physics.GROUND_Y + 3, boulder.radius * 0.8, 8)
+        local groundY = boulder.groundY or Physics.GROUND_Y
+        love.graphics.ellipse("fill", boulder.x + 4, groundY + 3, boulder.radius * 0.8, 8)
 
         -- Boulder body
         love.graphics.setColor(0.5, 0.5, 0.55, 1)
