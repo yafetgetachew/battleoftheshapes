@@ -35,6 +35,8 @@ function Player.new(id, controls)
     self.shapeKey    = nil              -- set after selection
     self.x           = 0
     self.y           = 0
+    self.aimX        = 0                -- Aim target X (world coords)
+    self.aimY        = 0                -- Aim target Y (world coords)
     self.vx          = 0
     self.vy          = 0
     self.onGround    = false
@@ -44,6 +46,9 @@ function Player.new(id, controls)
     self.maxWill      = 100
     self.speed       = 425              -- 25% faster (was 340)
     self.jumpForce   = -750             -- increased proportionally with gravity for snappier jumps
+    self.jumpForce2  = -950             -- higher second jump
+    self.jumpCount   = 0                -- current number of jumps performed
+    self.maxJumps    = 2                -- maximum number of jumps allowed (double jump)
     self.shapeWidth  = 48
     self.shapeHeight = 48
     self.facingRight = (id == 1)
@@ -122,9 +127,23 @@ function Player:handleInput(dt)
 end
 
 function Player:jump()
-    if self.onGround then
-        self.vy = self.jumpForce
+    if self.jumpCount < self.maxJumps then
+        if self.jumpCount == 0 then
+            self.vy = self.jumpForce
+        else
+            self.vy = self.jumpForce2
+        end
         self.onGround = false
+        self.jumpCount = self.jumpCount + 1
+        return true
+    end
+    return false
+end
+
+-- Stop jump (variable jump height)
+function Player:stopJump()
+    if self.vy < 0 and not self.isDashing then
+        self.vy = self.vy * 0.5
     end
 end
 
@@ -200,6 +219,15 @@ function Player:castAbilityAtNearest(allPlayers)
     end
 end
 
+-- Cast ability towards a specific point (x, y)
+function Player:castAbilityAt(tx, ty)
+    if self.will < Projectiles.WILL_COST then return false end
+    if not Player.ABILITY_MAP[self.shapeKey] then return false end
+
+    -- Only primary fire (fireball) supports aiming for now
+    return Projectiles.spawnFireballAt(self, tx, ty)
+end
+
 function Player:update(dt)
     if self.isRemote then
         -- Remote players: position comes from network, only update cosmetics + will regen
@@ -240,6 +268,7 @@ function Player:update(dt)
     self._justLanded = false
     if self.onGround and not wasOnGround then
         self._justLanded = true
+        self.jumpCount = 0  -- Reset jump count on landing
     end
     self._wasOnGround = self.onGround
 
@@ -375,6 +404,8 @@ function Player:applyNetState(state)
         self.life = state.life
     end
     if state.will ~= nil then self.will = state.will end
+    if state.aimX ~= nil then self.aimX = state.aimX end
+    if state.aimY ~= nil then self.aimY = state.aimY end
     if state.facingRight ~= nil then self.facingRight = state.facingRight end
     if state.armor ~= nil then self.armor = state.armor end
     if state.damageBoost ~= nil then self.damageBoost = state.damageBoost end
@@ -398,6 +429,8 @@ function Player:getNetState()
         vy = math.floor(self.vy),
         life = math.floor(self.life),
         will = math.floor(self.will * 10) / 10,
+        aimX = math.floor(self.aimX),
+        aimY = math.floor(self.aimY),
         facingRight = self.facingRight,
         armor = self.armor,
         damageBoost = self.damageBoost,
