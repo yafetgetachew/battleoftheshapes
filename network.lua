@@ -173,7 +173,7 @@ function Network.sendRaw(rawStr, reliable)
 end
 
 -- Encode all game state into a single compact tick message
--- Format: T;pid,x,y,vx,vy,life,will,f,a,db,ds;...;L,sc,wc,nt,s1x,s1a,...,w1x,w1a,...;D,bc,cc,st,b1x,b1y,b1vx,b1vy,b1og,...,c1x,c1y,c1a,c1k,...
+-- Format: T;pid,x,y,vx,vy,life,will,f,a,db,ds,aimX,aimY,dash,dashDir;...;L,sc,wc,nt,s1x,s1a,...,w1x,w1a,...;D,bc,cc,st,b1x,b1y,b1vx,b1vy,b1og,...,c1x,c1y,c1a,c1k,...
 function Network.encodeTick(playerStates, lightningState, dropboxState)
     local parts = {"T"}
 
@@ -182,7 +182,9 @@ function Network.encodeTick(playerStates, lightningState, dropboxState)
         parts[#parts + 1] = ps.pid .. "," .. ps.x .. "," .. ps.y .. ","
             .. ps.vx .. "," .. ps.vy .. "," .. ps.life .. "," .. ps.will .. ","
             .. ps.facing .. "," .. (ps.armor or 0) .. ","
-            .. (ps.dmgBoost or 0) .. "," .. (ps.dmgShots or 0)
+            .. (ps.dmgBoost or 0) .. "," .. (ps.dmgShots or 0) .. ","
+            .. (ps.aimX or 0) .. "," .. (ps.aimY or 0) .. ","
+            .. (ps.dash or 0) .. "," .. (ps.dashDir or 0)
     end
 
     -- Lightning section
@@ -297,7 +299,7 @@ function Network.decodeTick(raw)
             end
             dropboxState = {bc = bc, cc = cc, st = st, boxes = boxes, charges = charges}
         else
-            -- Player: pid,x,y,vx,vy,life,will,f,a,db,ds
+            -- Player: pid,x,y,vx,vy,life,will,f,a,db,ds[,aimX,aimY,dash,dashDir]
             local vals = {}
             for v in sec:gmatch("[^,]+") do vals[#vals + 1] = v end
             if #vals >= 11 then
@@ -312,7 +314,11 @@ function Network.decodeTick(raw)
                     facing = tonumber(vals[8]),
                     armor = tonumber(vals[9]) or 0,
                     dmgBoost = tonumber(vals[10]) or 0,
-                    dmgShots = tonumber(vals[11]) or 0
+                    dmgShots = tonumber(vals[11]) or 0,
+                    aimX = tonumber(vals[12]),
+                    aimY = tonumber(vals[13]),
+                    dash = tonumber(vals[14]),
+                    dashDir = tonumber(vals[15]) or 0
                 }
             end
         end
@@ -321,9 +327,10 @@ function Network.decodeTick(raw)
     return playerStates, lightningState, dropboxState
 end
 
--- Encode compact client state: C;pid,x,y,vx,vy,facing
-function Network.encodeClientState(pid, x, y, vx, vy, facing)
+-- Encode compact client state: C;pid,x,y,vx,vy,facing,aimX,aimY,dash,dashDir
+function Network.encodeClientState(pid, x, y, vx, vy, facing, aimX, aimY, dash, dashDir)
     return "C;" .. pid .. "," .. x .. "," .. y .. "," .. vx .. "," .. vy .. "," .. facing
+        .. "," .. (aimX or 0) .. "," .. (aimY or 0) .. "," .. (dash or 0) .. "," .. (dashDir or 0)
 end
 
 -- Decode compact client state
@@ -339,7 +346,11 @@ function Network.decodeClientState(raw)
         y = tonumber(vals[3]),
         vx = tonumber(vals[4]),
         vy = tonumber(vals[5]),
-        facing = tonumber(vals[6])
+        facing = tonumber(vals[6]),
+        aimX = tonumber(vals[7]),
+        aimY = tonumber(vals[8]),
+        dash = tonumber(vals[9]),
+        dashDir = tonumber(vals[10]) or 0
     }
 end
 

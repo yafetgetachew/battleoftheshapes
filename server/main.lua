@@ -217,8 +217,8 @@ function love.update(dt)
 
         -- Network sync: broadcast all state
         networkSyncTimer = networkSyncTimer + dt
-        if networkSyncTimer >= TICK_RATE then
-            networkSyncTimer = 0
+        while networkSyncTimer >= TICK_RATE do
+            networkSyncTimer = networkSyncTimer - TICK_RATE
             sendGameState()
         end
 
@@ -285,60 +285,83 @@ processNetworkMessages = function()
 
         elseif msg.type == "sel_browse" then
             local data = msg.data
-            if data and data.pid and data.idx then
-                selection:setRemoteChoice(data.pid, data.idx)
-                Network.relay(data.pid, "sel_browse", data, false)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and data.idx then
+                selection:setRemoteChoice(pid, data.idx)
+                if selection then
+                    selection:setConnected(pid, true)
+                end
+                data.pid = pid
+                Network.relay(pid, "sel_browse", data, false)
             end
 
         elseif msg.type == "sel_confirm" then
             local data = msg.data
-            if data and data.pid and data.idx then
-                selection:setRemoteConfirmed(data.pid, data.idx)
-                Network.relay(data.pid, "sel_confirm", data, true)
-                log("Player " .. data.pid .. " confirmed shape")
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and data.idx then
+                selection:setRemoteConfirmed(pid, data.idx)
+                if selection then
+                    selection:setConnected(pid, true)
+                end
+                data.pid = pid
+                Network.relay(pid, "sel_confirm", data, true)
+                log("Player " .. pid .. " confirmed shape")
             end
 
         elseif msg.type == "client_state_compact" then
             local data = Network.decodeClientState(msg.raw)
-            if data and data.pid and players[data.pid] and players[data.pid].isRemote then
-                players[data.pid]:applyNetState({
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] and players[pid].isRemote then
+                players[pid]:applyNetState({
                     x = data.x, y = data.y,
                     vx = data.vx, vy = data.vy,
-                    facingRight = (data.facing == 1)
+                    facingRight = (data.facing == 1),
+                    aimX = data.aimX,
+                    aimY = data.aimY,
+                    isDashing = (data.dash == 1),
+                    dashDir = data.dashDir
                 })
             end
 
         elseif msg.type == "player_jump" then
             local data = msg.data
-            if data and data.pid and players[data.pid] then
-                players[data.pid]:jump()
-                Network.relay(data.pid, "player_jump", data, true)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
+                players[pid]:jump()
+                data.pid = pid
+                Network.relay(pid, "player_jump", data, true)
             end
 
         elseif msg.type == "player_cast" then
             local data = msg.data
-            if data and data.pid and players[data.pid] then
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
                 if data.tx and data.ty then
-                    players[data.pid]:castAbilityAt(data.tx, data.ty)
+                    players[pid]:castAbilityAt(data.tx, data.ty)
                 else
-                    players[data.pid]:castAbilityAtNearest(players)
+                    players[pid]:castAbilityAtNearest(players)
                 end
-                Network.relay(data.pid, "player_cast", data, true)
+                data.pid = pid
+                Network.relay(pid, "player_cast", data, true)
             end
 
         elseif msg.type == "player_special" then
             local data = msg.data
-            if data and data.pid and players[data.pid] then
-                local p = players[data.pid]
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
+                local p = players[pid]
                 Abilities.cast(p, p.shapeKey, p.facingRight, data.tx, data.ty)
-                Network.relay(data.pid, "player_special", data, true)
+                data.pid = pid
+                Network.relay(pid, "player_special", data, true)
             end
 
         elseif msg.type == "player_dash" then
             local data = msg.data
-            if data and data.pid and players[data.pid] then
-                players[data.pid]:dash(data.dir)
-                Network.relay(data.pid, "player_dash", data, true)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
+                players[pid]:dash(data.dir)
+                data.pid = pid
+                Network.relay(pid, "player_dash", data, true)
             end
 
         elseif msg.type == "player_name" then
@@ -371,7 +394,11 @@ sendGameState = function()
                 facing = state.facingRight and 1 or 0,
                 armor = state.armor,
                 dmgBoost = state.damageBoost,
-                dmgShots = state.damageBoostShots or 0
+                dmgShots = state.damageBoostShots or 0,
+                aimX = state.aimX,
+                aimY = state.aimY,
+                dash = state.isDashing and 1 or 0,
+                dashDir = state.dashDir or 0
             }
         end
     end
@@ -543,9 +570,11 @@ restartGame = function()
     if connected > 0 then
         gameState = "selection"
         Network.send("game_restart", {}, true)
-        -- Send player_status for all connected players so clients know who's here
-        for pid, _ in pairs(Network.getConnectedPeers()) do
-            Network.send("player_status", {pid = pid, connected = true}, true)
+        for i = 1, maxPlayers do
+            Network.send("player_status", {
+                pid = i,
+                connected = selection.connected[i] == true
+            }, true)
         end
         log("Game restarted — back to selection (" .. connected .. " players)")
     else
@@ -561,4 +590,3 @@ function love.quit()
     log("Server shutting down...")
     Network.stop()
 end
-

@@ -358,14 +358,10 @@ function love.load()
         addHitPause(0.06)  -- Extra 60ms on kill
     end
 
-    -- Set up player damage callback for network damage numbers + juice
+    -- Network life deltas can arrive at high frequency (e.g. laser ticks).
+    -- Keep this lightweight to avoid multiplayer-wide hit-pause stalls.
     Player.onDamageReceived = function(x, y, damage)
         spawnDamageNumber(x, y, damage)
-        -- Add juice effects for clients (who don't get direct collision callbacks)
-        -- Use generic values that feel good for most hits
-        addHitPause(0.06)
-        addScreenShake(5, 0.2, 30)
-        Sounds.play("player_hurt") -- Ensure hurt sound plays if not already handled
     end
 
     -- Set up lightning hit callbacks for juice effects
@@ -547,11 +543,12 @@ function love.update(dt)
                 end
             end
 
-            -- Network sync: host broadcasts all state, clients send their own state
+            -- Network sync: host broadcasts all state, clients send their own state.
+            -- Use realDt so sync keeps running during local hit-pause effects.
             if Network.getRole() ~= Network.ROLE_NONE then
-                networkSyncTimer = networkSyncTimer + dt
-                if networkSyncTimer >= Network.TICK_RATE then
-                    networkSyncTimer = 0
+                networkSyncTimer = networkSyncTimer + realDt
+                while networkSyncTimer >= Network.TICK_RATE do
+                    networkSyncTimer = networkSyncTimer - Network.TICK_RATE
                     if Network.getRole() == Network.ROLE_HOST then
                         sendGameState()
                     else
@@ -572,10 +569,6 @@ function love.update(dt)
                  local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
                  localPlayer.aimX = worldX
                  localPlayer.aimY = worldY
-                 -- DEBUG: Print aim coords periodically
-                 if math.random() < 0.01 then
-                     print("Main: Player " .. localPlayer.id .. " aim set to " .. math.floor(worldX) .. ", " .. math.floor(worldY))
-                 end
             end
 
             -- Check for game over (last player standing)
@@ -711,7 +704,7 @@ function love.draw()
         Background.drawForeground(W, H, parallaxOffset)
 
         -- ── HUD (not affected by camera) ──
-        HUD.draw(players, W)
+        HUD.draw(players, W, H, Network.getLocalPlayerId())
 
         -- ── Countdown overlay ──
         if gameState == "countdown" then
@@ -1624,22 +1617,32 @@ function processNetworkMessages()
         elseif msg.type == "sel_browse" then
             -- Remote player is browsing shapes
             local data = msg.data
-            if data and data.pid and data.idx then
-                selection:setRemoteChoice(data.pid, data.idx)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and data.idx then
+                selection:setRemoteChoice(pid, data.idx)
+                if selection and Network.getRole() == Network.ROLE_HOST then
+                    selection:setConnected(pid, true)
+                end
                 -- Host relays to other clients
                 if Network.getRole() == Network.ROLE_HOST then
-                    Network.relay(data.pid, "sel_browse", data, false)
+                    data.pid = pid
+                    Network.relay(pid, "sel_browse", data, false)
                 end
             end
 
         elseif msg.type == "sel_confirm" then
             -- Remote player confirmed their shape
             local data = msg.data
-            if data and data.pid and data.idx then
-                selection:setRemoteConfirmed(data.pid, data.idx)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and data.idx then
+                selection:setRemoteConfirmed(pid, data.idx)
+                if selection and Network.getRole() == Network.ROLE_HOST then
+                    selection:setConnected(pid, true)
+                end
                 -- Host relays to other clients
                 if Network.getRole() == Network.ROLE_HOST then
-                    Network.relay(data.pid, "sel_confirm", data, true)
+                    data.pid = pid
+                    Network.relay(pid, "sel_confirm", data, true)
                 end
             end
 
@@ -1745,12 +1748,16 @@ function processNetworkMessages()
                 end
                 -- Apply lightning state
                 if lightningData and lightningData.sc ~= nil then
+                    local prevState = Lightning.getState()
+                    local prevStrikes = prevState and prevState.strikes or {}
                     local strikes = {}
                     for i, s in ipairs(lightningData.strikes or {}) do
+                        local prev = prevStrikes[i]
+                        local segments = (prev and prev.x == s.x and prev.segments) or Lightning.generateBoltSegments(s.x)
                         strikes[i] = {
                             x = s.x,
                             age = s.age,
-                            segments = Lightning.generateBoltSegments(s.x)
+                            segments = segments
                         }
                     end
                     Lightning.setState({
@@ -1773,11 +1780,16 @@ function processNetworkMessages()
             -- Host receives compact client state
             if Network.getRole() == Network.ROLE_HOST then
                 local data = Network.decodeClientState(msg.raw)
-                if data and data.pid and players[data.pid] and players[data.pid].isRemote then
-                    players[data.pid]:applyNetState({
+                local pid = msg.fromPlayerId or (data and data.pid)
+                if data and pid and players[pid] and players[pid].isRemote then
+                    players[pid]:applyNetState({
                         x = data.x, y = data.y,
                         vx = data.vx, vy = data.vy,
-                        facingRight = (data.facing == 1)
+                        facingRight = (data.facing == 1),
+                        aimX = data.aimX,
+                        aimY = data.aimY,
+                        isDashing = (data.dash == 1),
+                        dashDir = data.dashDir
                     })
                 end
             end
@@ -1785,48 +1797,56 @@ function processNetworkMessages()
         elseif msg.type == "player_jump" then
             -- Remote player jumped
             local data = msg.data
-            if data and data.pid and players[data.pid] then
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
                 Sounds.play("jump")
-                players[data.pid]:jump()
+                players[pid]:jump()
+                data.pid = pid
                 -- Host relays to other clients
                 if Network.getRole() == Network.ROLE_HOST then
-                    Network.relay(data.pid, "player_jump", data, true)
+                    Network.relay(pid, "player_jump", data, true)
                 end
             end
 
         elseif msg.type == "player_cast" then
             -- Remote player cast ability
             local data = msg.data
-            if data and data.pid and players[data.pid] then
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
                 if data.tx and data.ty then
-                    players[data.pid]:castAbilityAt(data.tx, data.ty)
+                    players[pid]:castAbilityAt(data.tx, data.ty)
                 else
-                    players[data.pid]:castAbilityAtNearest(players)
+                    players[pid]:castAbilityAtNearest(players)
                 end
+                data.pid = pid
                 if Network.getRole() == Network.ROLE_HOST then
-                    Network.relay(data.pid, "player_cast", data, true)
+                    Network.relay(pid, "player_cast", data, true)
                 end
             end
 
         elseif msg.type == "player_special" then
             -- Remote player used special ability
             local data = msg.data
-            if data and data.pid and players[data.pid] then
-                local p = players[data.pid]
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
+                local p = players[pid]
                 Abilities.cast(p, p.shapeKey, p.facingRight, data.tx, data.ty)
+                data.pid = pid
                 if Network.getRole() == Network.ROLE_HOST then
-                    Network.relay(data.pid, "player_special", data, true)
+                    Network.relay(pid, "player_special", data, true)
                 end
             end
 
         elseif msg.type == "player_dash" then
             -- Remote player dashed
             local data = msg.data
-            if data and data.pid and players[data.pid] then
-                players[data.pid]:dash(data.dir)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
+                players[pid]:dash(data.dir)
                 Sounds.play("dash_whoosh")
+                data.pid = pid
                 if Network.getRole() == Network.ROLE_HOST then
-                    Network.relay(data.pid, "player_dash", data, true)
+                    Network.relay(pid, "player_dash", data, true)
                 end
             end
 
@@ -1846,6 +1866,7 @@ function processNetworkMessages()
             Abilities.clear()
             Lightning.reset()
             Dropbox.reset()
+            local prevConnected = selection and selection.connected or nil
             -- Preserve player names
             local savedNames = {}
             for i = 1, maxPlayers do
@@ -1863,7 +1884,18 @@ function processNetworkMessages()
                 end
             end
             selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
-            -- player_status messages from host will re-mark connected players
+            if prevConnected then
+                for i = 1, maxPlayers do
+                    if prevConnected[i] then
+                        selection:setConnected(i, true)
+                    end
+                end
+            end
+            local localPid = Network.getLocalPlayerId()
+            if localPid and localPid >= 1 and localPid <= maxPlayers then
+                selection:setConnected(localPid, true)
+            end
+            networkSyncTimer = 0
             gameState = "selection"
 
         elseif msg.type == "game_state" then
@@ -1891,7 +1923,11 @@ function sendGameState()
                 facing = state.facingRight and 1 or 0,
                 armor = state.armor,
                 dmgBoost = state.damageBoost,
-                dmgShots = state.damageBoostShots or 0
+                dmgShots = state.damageBoostShots or 0,
+                aimX = state.aimX,
+                aimY = state.aimY,
+                dash = state.isDashing and 1 or 0,
+                dashDir = state.dashDir or 0
             }
         end
     end
@@ -1942,7 +1978,10 @@ function sendClientState()
     local state = p:getNetState()
     local encoded = Network.encodeClientState(
         pid, state.x, state.y, state.vx, state.vy,
-        state.facingRight and 1 or 0
+        state.facingRight and 1 or 0,
+        state.aimX, state.aimY,
+        state.isDashing and 1 or 0,
+        state.dashDir or 0
     )
     Network.sendRaw(encoded, false)
 end
@@ -1961,7 +2000,11 @@ function applyGameState(data)
             facingRight = (data.facing == 1),
             armor = data.armor,
             damageBoost = data.dmgBoost,
-            damageBoostShots = data.dmgShots
+            damageBoostShots = data.dmgShots,
+            aimX = data.aimX,
+            aimY = data.aimY,
+            isDashing = (data.dash == 1),
+            dashDir = data.dashDir
         })
     else
         -- Local player: only apply authoritative life/buffs from host
@@ -2066,6 +2109,31 @@ function getLocalPlayer()
     return players[pid]
 end
 
+local function restoreSelectionConnections(prevConnected)
+    if not selection then return end
+    if prevConnected then
+        for i = 1, maxPlayers do
+            if prevConnected[i] then
+                selection:setConnected(i, true)
+            end
+        end
+    end
+    local localPid = Network.getLocalPlayerId()
+    if localPid and localPid >= 1 and localPid <= maxPlayers then
+        selection:setConnected(localPid, true)
+    end
+end
+
+local function broadcastSelectionStatusSnapshot()
+    if Network.getRole() ~= Network.ROLE_HOST or not selection then return end
+    for i = 1, maxPlayers do
+        Network.send("player_status", {
+            pid = i,
+            connected = selection.connected[i] == true
+        }, true)
+    end
+end
+
 function restartGame()
     if demoMode then
         -- Demo mode: restart with same setup
@@ -2088,6 +2156,7 @@ function restartGame()
         Abilities.clear()
         Lightning.reset()
         Dropbox.reset()
+        networkSyncTimer = 0
 
         -- Preserve player names across restart
         local savedNames = {}
@@ -2106,19 +2175,19 @@ function restartGame()
             end
         end
 
+        local prevConnected = selection and selection.connected or nil
         selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
+        restoreSelectionConnections(prevConnected)
 
-        -- Re-mark connected players in the new selection
         if Network.getRole() == Network.ROLE_HOST then
-            -- Host: re-mark self + all connected peers
+            if not serverMode then
+                selection:setConnected(1, true)
+            end
             for pid, _ in pairs(Network.getConnectedPeers()) do
                 selection:setConnected(pid, true)
             end
             Network.send("game_restart", {}, true)
-            -- Send player_status for all connected players so clients know who's here
-            for pid, _ in pairs(Network.getConnectedPeers()) do
-                Network.send("player_status", {pid = pid, connected = true}, true)
-            end
+            broadcastSelectionStatusSnapshot()
         end
 
         gameState = "selection"
