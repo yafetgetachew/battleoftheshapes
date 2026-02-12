@@ -65,14 +65,14 @@ love.filesystem.write = love.filesystem.write or gfxNoop
 -- ─────────────────────────────────────────────
 -- Parse command-line arguments
 -- ─────────────────────────────────────────────
-local maxPlayers = 3
+local maxPlayers = 12
 local port = 27015
 
 local args = arg or {}
 for i = 1, #args do
     if args[i] == "--players" and args[i + 1] then
         local n = tonumber(args[i + 1])
-        if n == 2 or n == 3 then maxPlayers = n end
+        if n and n >= 2 and n <= 12 then maxPlayers = n end
     elseif args[i] == "--port" and args[i + 1] then
         local p = tonumber(args[i + 1])
         if p and p > 0 and p < 65536 then port = p end
