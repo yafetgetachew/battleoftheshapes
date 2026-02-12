@@ -226,7 +226,7 @@ end
 function Abilities.spawnBoulder(caster, facingRight)
     if caster.will < Abilities.COSTS.circle then return false end
     caster.will = caster.will - Abilities.COSTS.circle
-    
+
     local dir = facingRight and 1 or -1
     local boulder = {
         type = "boulder",
@@ -234,7 +234,7 @@ function Abilities.spawnBoulder(caster, facingRight)
         x = caster.x + dir * 50,
         groundY = caster.y + caster.shapeHeight / 2, -- Store ground level relative to player
         y = (caster.y + caster.shapeHeight / 2) - 35,  -- Spawn relative to player's feet
-        vx = 350 * dir,             -- Rolling speed
+        vx = 500 * dir,             -- Rolling speed (increased for better roll)
         vy = 0,
         damage = Abilities.DAMAGE.circle,
         radius = 35,                -- Larger than player
@@ -461,21 +461,25 @@ function Abilities.update(dt, players)
         -- Check if block has tipped over (rotation past ~80 degrees = 1.4 radians)
         if block.rotation and math.abs(block.rotation) >= 1.4 then
             Sounds.play("block_land")
-            -- Spawn debris chunks that bounce around
+            -- Spawn debris chunks that bounce around and deal damage
             local pivotY = block.groundY or Physics.GROUND_Y
             local pivotX = block.x - block.dir * block.width / 2
             local tipX = pivotX + math.sin(block.rotation) * block.height
             local tipY = pivotY + (-math.cos(block.rotation) * block.height)
-            for d = 1, 3 do
+            local debrisDamage = math.ceil(block.damage / 3)  -- Each debris does 1/3 of block damage
+            for d = 1, 5 do  -- Spawn 5 debris pieces
                 table.insert(activeDebris, {
-                    x = pivotX + (tipX - pivotX) * (d / 3),
-                    y = tipY + (pivotY - tipY) * (d / 3) - 10,
-                    vx = (math.random() - 0.5) * 300 + block.vx * 0.3,
-                    vy = -math.random() * 200 - 100,
-                    size = math.random(8, 16),
+                    x = pivotX + (tipX - pivotX) * (d / 5),
+                    y = tipY + (pivotY - tipY) * (d / 5) - 10,
+                    vx = (math.random() - 0.5) * 400 + block.vx * 0.5,
+                    vy = -math.random() * 250 - 150,
+                    size = math.random(12, 22),  -- Larger debris
                     age = 0,
                     rotation = math.random() * math.pi * 2,
                     rotSpeed = (math.random() - 0.5) * 10,
+                    owner = block.owner,         -- Track owner for damage
+                    damage = debrisDamage,       -- Damage per debris hit
+                    hitCooldowns = {},           -- Per-player hit cooldown to prevent multi-hit
                 })
             end
             hit = true
@@ -530,13 +534,49 @@ function Abilities.update(dt, players)
         end
     end
 
-    -- Update debris (bouncing block chunks)
+    -- Update debris (bouncing block chunks that deal damage)
     for i = #activeDebris, 1, -1 do
         local d = activeDebris[i]
         d.age = d.age + dt
         d.rotation = d.rotation + d.rotSpeed * dt
         applyAbilityPhysics(d, dt, d.size / 2, true)
-        if d.age > 2.5 then
+
+        -- Update hit cooldowns
+        if d.hitCooldowns then
+            for pid, cooldown in pairs(d.hitCooldowns) do
+                d.hitCooldowns[pid] = cooldown - dt
+                if d.hitCooldowns[pid] <= 0 then
+                    d.hitCooldowns[pid] = nil
+                end
+            end
+        end
+
+        -- Check player collision for damage (only if debris has damage capability)
+        if d.damage and d.owner then
+            for _, player in ipairs(players) do
+                if player.id ~= d.owner and (player.life or 0) > 0 then
+                    -- Check if this player is on cooldown
+                    if not d.hitCooldowns or not d.hitCooldowns[player.id] then
+                        local dx = d.x - player.x
+                        local dy = d.y - player.y
+                        local dist = math.sqrt(dx * dx + dy * dy)
+                        local playerRadius = math.max(player.shapeWidth, player.shapeHeight) / 2
+                        local debrisRadius = d.size / 2
+                        if dist < debrisRadius + playerRadius then
+                            local hitDir = d.vx > 0 and 1 or -1
+                            applyDamage(player, d.damage, hitDir, isAuthority)
+                            Sounds.play("block_hit")
+                            -- Set cooldown to prevent rapid multi-hits (0.5 second cooldown)
+                            d.hitCooldowns = d.hitCooldowns or {}
+                            d.hitCooldowns[player.id] = 0.5
+                        end
+                    end
+                end
+            end
+        end
+
+        -- Remove after 3 seconds (debris fades away)
+        if d.age > 3.0 then
             table.remove(activeDebris, i)
         end
     end
@@ -546,8 +586,37 @@ function Abilities.update(dt, players)
         local boulder = activeBoulders[i]
         boulder.age = boulder.age + dt
 
-        -- Apply physics: gravity, ground/platform bounce, wall bounce
-        applyAbilityPhysics(boulder, dt, boulder.radius, true)
+        -- Custom physics for boulder: minimal friction so it keeps rolling
+        boulder.vy = boulder.vy + ABILITY_GRAVITY * dt
+        boulder.x = boulder.x + boulder.vx * dt
+        boulder.y = boulder.y + boulder.vy * dt
+
+        -- Ground collision (minimal friction for rolling)
+        local footY = boulder.y + boulder.radius
+        if footY >= Physics.GROUND_Y then
+            boulder.y = Physics.GROUND_Y - boulder.radius
+            if boulder.vy > 0 then
+                boulder.vy = -boulder.vy * 0.3  -- Low bounce
+                boulder.vx = boulder.vx * 0.98  -- Very low friction - keeps rolling!
+                if math.abs(boulder.vy) < 30 then
+                    boulder.vy = 0
+                    boulder.onGround = true
+                end
+            end
+        end
+
+        -- Wall bounce
+        if boulder.x - boulder.radius < Physics.WALL_LEFT then
+            boulder.x = Physics.WALL_LEFT + boulder.radius
+            boulder.vx = -boulder.vx * ABILITY_WALL_BOUNCE
+        elseif boulder.x + boulder.radius > Physics.WALL_RIGHT then
+            boulder.x = Physics.WALL_RIGHT - boulder.radius
+            boulder.vx = -boulder.vx * ABILITY_WALL_BOUNCE
+        end
+
+        -- Apply very gradual friction over time (slows down naturally)
+        boulder.vx = boulder.vx * (1 - 0.3 * dt)  -- Gradual slowdown
+
         boulder.rotation = boulder.rotation + (boulder.vx / boulder.radius) * dt
 
         local hit = false
@@ -571,7 +640,7 @@ function Abilities.update(dt, players)
             end
         end
 
-        -- Remove if speed is too low (stopped bouncing) or too old
+        -- Remove if speed is too low (stopped rolling) or too old
         local speed = math.abs(boulder.vx) + math.abs(boulder.vy)
         if hit or boulder.age > 5 or (boulder.age > 2 and speed < 20) then
             table.remove(activeBoulders, i)
@@ -723,21 +792,22 @@ function Abilities.draw()
         love.graphics.circle("line", boulder.x, boulder.y, boulder.radius)
     end
 
-    -- Draw block debris (bouncing chunks)
+    -- Draw block debris (bouncing chunks that deal damage)
     for _, d in ipairs(activeDebris) do
-        local alpha = math.max(0, 1 - d.age / 2.5)
+        local alpha = math.max(0, 1 - d.age / 3.0)  -- Fade over 3 seconds
         love.graphics.push()
         love.graphics.translate(d.x, d.y)
         love.graphics.rotate(d.rotation)
         -- Shadow
-        love.graphics.setColor(0, 0, 0, alpha * 0.2)
-        love.graphics.rectangle("fill", -d.size/2 + 2, -d.size/2 + 2, d.size, d.size)
-        -- Chunk
-        love.graphics.setColor(0.6, 0.4, 0.2, alpha)
+        love.graphics.setColor(0, 0, 0, alpha * 0.3)
+        love.graphics.rectangle("fill", -d.size/2 + 3, -d.size/2 + 3, d.size, d.size)
+        -- Chunk (slightly reddish to indicate danger)
+        local dangerTint = d.damage and 0.15 or 0
+        love.graphics.setColor(0.6 + dangerTint, 0.4, 0.2, alpha)
         love.graphics.rectangle("fill", -d.size/2, -d.size/2, d.size, d.size)
-        -- Outline
-        love.graphics.setColor(0.8, 0.6, 0.3, alpha * 0.8)
-        love.graphics.setLineWidth(1)
+        -- Outline (brighter when dangerous)
+        love.graphics.setColor(0.8 + dangerTint, 0.6, 0.3, alpha * 0.9)
+        love.graphics.setLineWidth(2)
         love.graphics.rectangle("line", -d.size/2, -d.size/2, d.size, d.size)
         love.graphics.pop()
     end

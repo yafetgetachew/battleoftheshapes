@@ -59,8 +59,10 @@ local bots = {}            -- bot AI state for each bot player
 local menuChoice = 1       -- 1 = Host, 2 = Join, 3 = Demo, 4 = Settings
 local joinAddress = ""
 local menuStatus = ""
-local settingsRow = 1      -- 1-3 for grid rows
+local settingsRow = 1      -- 1-4 for grid rows
 local settingsCol = 1      -- 1-2 for grid columns (left/right)
+local settingsEditingName = false  -- true when typing name
+local settingsNameBuffer = ""      -- temporary buffer while typing name
 local serverMode = false   -- true = dedicated server (host is relay only)
 local ipHistoryIndex = 0   -- 0 = typing new IP, 1+ = selecting from history
 
@@ -590,7 +592,7 @@ function love.draw()
     elseif gameState == "connecting" then
         drawConnecting(W, H)
     elseif gameState == "selection" then
-        selection:draw(W, H, Config.getControls())
+        selection:draw(W, H, Config.getControls(), players)
         if serverMode then
             -- Server mode overlay on selection screen
 	        love.graphics.setFont(getFont(16))
@@ -841,17 +843,38 @@ function startCountdown()
     Projectiles.clear()
     Abilities.clear()
 
+    -- Find which players are connected/active
+    local activePlayers = {}
+    for i = 1, maxPlayers do
+        if selection and selection.connected[i] then
+            table.insert(activePlayers, i)
+        elseif demoMode then
+            -- In demo mode, all created players are active
+            table.insert(activePlayers, i)
+        end
+    end
+
     -- Spawn positions (spread evenly across the stage)
     local stageLeft = 250
     local stageRight = 1030
-    if maxPlayers == 2 then
-        players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
-        players[2]:spawn(stageRight, Physics.GROUND_Y - players[2].shapeHeight / 2)
+    local stageWidth = stageRight - stageLeft
+    local activeCount = #activePlayers
+
+    if activeCount == 1 then
+        -- Single player - center
+        local pid = activePlayers[1]
+        players[pid]:spawn((stageLeft + stageRight) / 2, Physics.GROUND_Y - players[pid].shapeHeight / 2)
+    elseif activeCount == 2 then
+        -- Two players - left and right
+        players[activePlayers[1]]:spawn(stageLeft, Physics.GROUND_Y - players[activePlayers[1]].shapeHeight / 2)
+        players[activePlayers[2]]:spawn(stageRight, Physics.GROUND_Y - players[activePlayers[2]].shapeHeight / 2)
     else
-        local stageMiddle = (stageLeft + stageRight) / 2
-        players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
-        players[2]:spawn(stageMiddle, Physics.GROUND_Y - players[2].shapeHeight / 2)
-        players[3]:spawn(stageRight, Physics.GROUND_Y - players[3].shapeHeight / 2)
+        -- 3+ players - spread evenly
+        for idx, pid in ipairs(activePlayers) do
+            local t = (idx - 1) / (activeCount - 1)  -- 0 to 1
+            local x = stageLeft + t * stageWidth
+            players[pid]:spawn(x, Physics.GROUND_Y - players[pid].shapeHeight / 2)
+        end
     end
 
     countdownTimer = 3.0
@@ -866,6 +889,8 @@ function startCountdown()
         for i = 1, maxPlayers do
             data["s" .. i] = choices[i]
         end
+        -- Also send which players are active
+        data.activePlayers = activePlayers
         Network.send("start_countdown", data, true)
     end
 end
@@ -1042,27 +1067,52 @@ end
 -- Settings Screen
 -- ─────────────────────────────────────────────
 function handleSettingsKey(key)
-    -- Grid layout: 2 columns x 3 rows
-    -- Left col (1): Control Scheme, Player Count, Server Mode
-    -- Right col (2): Aim Assist, Demo Invulnerability, Background Music
-    local maxRows = 3
+    -- Grid layout: 2 columns x 4 rows
+    -- Left col (1): Control Scheme, Player Count, Server Mode, Player Name
+    -- Right col (2): Aim Assist, Demo Invulnerable, Music, (empty)
+    local maxRows = 4
     local maxCols = 2
+
+    -- Handle name editing mode
+    if settingsEditingName then
+        if key == "return" or key == "escape" then
+            -- Save and exit editing mode
+            Config.setPlayerName(settingsNameBuffer)
+            settingsEditingName = false
+            Sounds.play("menu_nav")
+        elseif key == "backspace" then
+            settingsNameBuffer = settingsNameBuffer:sub(1, -2)
+        end
+        return  -- Don't process other keys while editing
+    end
 
     if key == "up" or key == "w" then
         settingsRow = settingsRow - 1
         if settingsRow < 1 then settingsRow = maxRows end
+        -- Skip row 4 col 2 (empty cell)
+        if settingsRow == 4 and settingsCol == 2 then settingsRow = 3 end
         Sounds.play("menu_nav")
     elseif key == "down" or key == "s" then
         settingsRow = settingsRow + 1
         if settingsRow > maxRows then settingsRow = 1 end
+        -- Skip row 4 col 2 (empty cell)
+        if settingsRow == 4 and settingsCol == 2 then settingsRow = 1 end
         Sounds.play("menu_nav")
-    elseif key == "tab" then
-        -- Switch columns
-        settingsCol = settingsCol == 1 and 2 or 1
+    elseif key == "left" or key == "a" then
+        -- Navigate to left column
+        if settingsCol > 1 then
+            settingsCol = settingsCol - 1
+            Sounds.play("menu_nav")
+        end
+    elseif key == "right" or key == "d" then
+        -- Navigate to right column (but not on row 4)
+        if settingsCol < maxCols and settingsRow < 4 then
+            settingsCol = settingsCol + 1
+            Sounds.play("menu_nav")
+        end
+    elseif key == "space" or key == "return" then
+        -- Toggle/change the selected setting
         Sounds.play("menu_nav")
-    elseif key == "left" or key == "a" or key == "right" or key == "d" then
-        Sounds.play("menu_nav")
-        -- Toggle settings based on current grid position
         if settingsCol == 1 then
             -- Left column
             if settingsRow == 1 then
@@ -1070,12 +1120,18 @@ function handleSettingsKey(key)
                 local current = Config.getControlScheme()
                 Config.setControlScheme(current == "wasd" and "arrows" or "wasd")
             elseif settingsRow == 2 then
-                -- Toggle player count
+                -- Cycle player count (2-12)
                 local current = Config.getPlayerCount()
-                Config.setPlayerCount(current == 2 and 3 or 2)
+                local next = current + 1
+                if next > 12 then next = 2 end
+                Config.setPlayerCount(next)
             elseif settingsRow == 3 then
                 -- Toggle server mode
                 Config.setServerMode(not Config.getServerMode())
+            elseif settingsRow == 4 then
+                -- Start editing player name
+                settingsEditingName = true
+                settingsNameBuffer = Config.getPlayerName() or ""
             end
         else
             -- Right column
@@ -1098,6 +1154,16 @@ function handleSettingsKey(key)
     end
 end
 
+-- Handle text input for name editing
+function handleSettingsTextInput(text)
+    if settingsEditingName then
+        -- Limit name length to 12 characters
+        if #settingsNameBuffer < 12 then
+            settingsNameBuffer = settingsNameBuffer .. text
+        end
+    end
+end
+
 function drawSettings(W, H)
     love.graphics.setColor(0.06, 0.06, 0.1)
     love.graphics.rectangle("fill", 0, 0, W, H)
@@ -1105,19 +1171,19 @@ function drawSettings(W, H)
     -- Title
     love.graphics.setFont(getFont(32))
     love.graphics.setColor(1.0, 0.85, 0.2)
-    love.graphics.printf("Settings", 0, 50, W, "center")
+    love.graphics.printf("Settings", 0, 40, W, "center")
 
-    -- Grid layout: 2 columns x 3 rows
-    local labelFont = getFont(16)
-    local valueFont = getFont(20)
+    -- Grid layout: 2 columns x 4 rows
+    local labelFont = getFont(14)
+    local valueFont = getFont(18)
     local colWidth = 320
     local leftColX = W/2 - colWidth - 40
     local rightColX = W/2 + 40
-    local startY = 130
-    local rowHeight = 140
+    local startY = 100
+    local rowHeight = 115
 
     -- Helper to draw a setting cell
-    local function drawCell(col, row, label, value, isOn, detail)
+    local function drawCell(col, row, label, value, isOn, detail, isEditing)
         local x = (col == 1) and leftColX or rightColX
         local y = startY + (row - 1) * rowHeight
         local isSelected = (settingsCol == col and settingsRow == row)
@@ -1126,7 +1192,8 @@ function drawSettings(W, H)
         if isSelected then
             love.graphics.setColor(0.2, 0.2, 0.3, 0.8)
             love.graphics.rectangle("fill", x - 10, y - 8, colWidth + 20, rowHeight - 20, 8, 8)
-            love.graphics.setColor(1.0, 0.85, 0.2, 0.8)
+            local borderColor = isEditing and {0.4, 1.0, 0.4, 0.9} or {1.0, 0.85, 0.2, 0.8}
+            love.graphics.setColor(borderColor)
             love.graphics.setLineWidth(2)
             love.graphics.rectangle("line", x - 10, y - 8, colWidth + 20, rowHeight - 20, 8, 8)
         end
@@ -1138,21 +1205,24 @@ function drawSettings(W, H)
 
         -- Value
         love.graphics.setFont(valueFont)
-        if isOn == nil then
-            -- Custom color (for control scheme)
+        if isEditing then
+            love.graphics.setColor(0.4, 1.0, 0.4)
+        elseif isOn == nil then
             love.graphics.setColor(isSelected and {0.4, 0.9, 1.0} or {0.3, 0.6, 0.7})
         elseif isOn then
             love.graphics.setColor(isSelected and {0.4, 1.0, 0.4} or {0.3, 0.7, 0.3})
         else
             love.graphics.setColor(isSelected and {1.0, 0.5, 0.4} or {0.7, 0.4, 0.3})
         end
-        love.graphics.printf("◀ " .. value .. " ▶", x, y + 24, colWidth, "center")
+
+        local displayValue = isEditing and (value .. "_") or ("◀ " .. value .. " ▶")
+        love.graphics.printf(displayValue, x, y + 20, colWidth, "center")
 
         -- Detail (smaller, below value)
         if detail then
-            love.graphics.setFont(getFont(12))
+            love.graphics.setFont(getFont(11))
             love.graphics.setColor(0.45, 0.45, 0.5)
-            love.graphics.printf(detail, x, y + 52, colWidth, "center")
+            love.graphics.printf(detail, x, y + 44, colWidth, "center")
         end
     end
 
@@ -1163,17 +1233,24 @@ function drawSettings(W, H)
     local aa = Config.getAimAssist()
     local di = Config.getDemoInvulnerable()
     local mm = Config.getMusicMuted()
+    local playerName = Config.getPlayerName() or ""
 
     -- Left column
     drawCell(1, 1, "Controls",
         scheme == "wasd" and "WASD" or "Arrows", nil,
-        scheme == "wasd" and "A/D move • Space jump • W cast • E special" or "←/→ move • Enter jump • ↑ cast • ↓ special")
+        scheme == "wasd" and "A/D • Space • W • E" or "←/→ • Enter • ↑ • ↓")
     drawCell(1, 2, "Players",
-        pc .. " Players", pc == 3,
+        pc .. " Players", pc >= 3,
         pc == 2 and "1v1 duel" or "Free-for-all")
     drawCell(1, 3, "Server Mode",
         sm and "ON" or "OFF", sm,
         sm and "Host is relay only" or "Host plays too")
+
+    -- Player Name (row 4, col 1)
+    local nameDisplay = settingsEditingName and settingsNameBuffer or (playerName ~= "" and playerName or "(default)")
+    drawCell(1, 4, "Your Name",
+        nameDisplay, nil,
+        "Shown above your shape", settingsEditingName)
 
     -- Right column
     drawCell(2, 1, "Aim Assist",
@@ -1186,16 +1263,13 @@ function drawSettings(W, H)
         mm and "OFF" or "ON", not mm,
         mm and "Music muted" or "Music enabled")
 
-    -- Column indicator
-    love.graphics.setFont(getFont(14))
-    love.graphics.setColor(0.5, 0.5, 0.6)
-    love.graphics.printf("← Left Column", leftColX, startY + 3 * rowHeight + 10, colWidth, "center")
-    love.graphics.printf("Right Column →", rightColX, startY + 3 * rowHeight + 10, colWidth, "center")
-
     -- Instructions
     love.graphics.setFont(getFont(14))
     love.graphics.setColor(0.5, 0.5, 0.5)
-    love.graphics.printf("↑/↓ navigate  •  Tab switch column  •  ←/→ change  •  Backspace/Esc back", 0, H - 50, W, "center")
+    local instructions = settingsEditingName
+        and "Type name • Enter to save • Esc to cancel"
+        or "↑/↓/←/→ navigate  •  Space change  •  Esc back"
+    love.graphics.printf(instructions, 0, H - 50, W, "center")
 end
 
 function drawConnecting(W, H)
@@ -1277,6 +1351,9 @@ function startAsHost()
         else
             -- Normal mode: host is P1
             players[1] = Player.new(1, Config.getControls())
+            -- Set player name from config
+            local configName = Config.getPlayerName()
+            if configName then players[1].name = configName end
             for i = 2, maxPlayers do
                 players[i] = Player.new(i, nil)
                 players[i].isRemote = true
@@ -1300,9 +1377,12 @@ function startAsClient(address)
     end
 end
 
--- love.textinput for IP address entry
+-- love.textinput for IP address entry and settings name input
 function love.textinput(text)
-    if gameState == "connecting" and not Network.isConnected() then
+    if gameState == "settings" and settingsEditingName then
+        -- Allow typing player name (alphanumeric and common symbols)
+        handleSettingsTextInput(text)
+    elseif gameState == "connecting" and not Network.isConnected() then
         -- Allow typing IP address
         if text:match("[0-9%.a-zA-Z:]") then
             joinAddress = joinAddress .. text
@@ -1376,10 +1456,40 @@ function processNetworkMessages()
         if msg.type == "player_connected" then
             -- A new client connected (host only)
             local connected = Network.getConnectedCount() - 1  -- subtract host
+            -- Mark player as connected in selection
+            if selection then
+                selection:setConnected(msg.playerId, true)
+            end
             if serverMode then
                 menuStatus = "Server mode on " .. Network.getHostAddress() .. ":" .. Network.PORT .. " (" .. connected .. "/" .. maxPlayers .. " players)"
+                -- Send connected players info to the new client
+                for i = 1, maxPlayers do
+                    if selection and selection.connected[i] and i ~= msg.playerId then
+                        Network.sendTo(msg.playerId, "player_status", {pid = i, connected = true}, true)
+                    end
+                end
+                -- Relay to other clients that this player connected
+                Network.relay(msg.playerId, "player_status", {pid = msg.playerId, connected = true}, true)
             else
                 menuStatus = "Player " .. msg.playerId .. " connected (" .. connected .. "/" .. maxPlayers .. ")"
+                -- Send host's name to new player
+                local pid = Network.getLocalPlayerId()
+                if players[pid] then
+                    Network.sendTo(msg.playerId, "player_name", {pid = pid, name = players[pid].name}, true)
+                end
+                -- Also send names and connection status of all other connected players to the new player
+                for i = 1, maxPlayers do
+                    if i ~= msg.playerId then
+                        if selection and selection.connected[i] then
+                            Network.sendTo(msg.playerId, "player_status", {pid = i, connected = true}, true)
+                        end
+                        if i ~= pid and players[i] and players[i].name then
+                            Network.sendTo(msg.playerId, "player_name", {pid = i, name = players[i].name}, true)
+                        end
+                    end
+                end
+                -- Relay to other clients that this player connected
+                Network.relay(msg.playerId, "player_status", {pid = msg.playerId, connected = true}, true)
             end
 
         elseif msg.type == "id_assigned" then
@@ -1394,6 +1504,11 @@ function processNetworkMessages()
             -- Set local player
             players[pid].isRemote = false
             players[pid].controls = Config.getControls()
+            -- Set player name from config
+            local configName = Config.getPlayerName()
+            if configName then players[pid].name = configName end
+            -- Send our name to the server
+            Network.send("player_name", {pid = pid, name = players[pid].name}, true)
 
             -- Save IP to history on successful connection
             if #joinAddress > 0 then
@@ -1412,6 +1527,13 @@ function processNetworkMessages()
             if players[msg.playerId] then
                 players[msg.playerId].life = 0
             end
+            -- Mark player as disconnected in selection
+            if selection then
+                selection:setConnected(msg.playerId, false)
+                selection.confirmed[msg.playerId] = false  -- Also unconfirm
+            end
+            -- Relay to other clients
+            Network.relay(msg.playerId, "player_status", {pid = msg.playerId, connected = false}, true)
 
         elseif msg.type == "disconnected" then
             -- Lost connection to server
@@ -1443,6 +1565,28 @@ function processNetworkMessages()
                 end
             end
 
+        elseif msg.type == "player_status" then
+            -- Player connection status update
+            local data = msg.data
+            if data and data.pid then
+                if selection then
+                    selection:setConnected(data.pid, data.connected == true)
+                end
+            end
+
+        elseif msg.type == "player_name" then
+            -- Remote player sent their name
+            local data = msg.data
+            if data and data.pid and data.name then
+                if players[data.pid] then
+                    players[data.pid].name = data.name
+                end
+                -- Host relays to other clients
+                if Network.getRole() == Network.ROLE_HOST then
+                    Network.relay(data.pid, "player_name", data, true)
+                end
+            end
+
         elseif msg.type == "start_countdown" then
             -- Client received countdown start from host
             local data = msg.data
@@ -1452,17 +1596,39 @@ function processNetworkMessages()
                 end
                 Projectiles.clear()
                 Abilities.clear()
+
+                -- Get active players from host or fall back to connected players
+                local activePlayers = data.activePlayers
+                if not activePlayers then
+                    -- Fallback: find connected players from selection
+                    activePlayers = {}
+                    for i = 1, maxPlayers do
+                        if selection and selection.connected[i] then
+                            table.insert(activePlayers, i)
+                        end
+                    end
+                end
+
+                -- Spawn positions (spread evenly across the stage)
                 local stageLeft = 250
                 local stageRight = 1030
-                if maxPlayers == 2 then
-                    players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
-                    players[2]:spawn(stageRight, Physics.GROUND_Y - players[2].shapeHeight / 2)
+                local stageWidth = stageRight - stageLeft
+                local activeCount = #activePlayers
+
+                if activeCount == 1 then
+                    local pid = activePlayers[1]
+                    players[pid]:spawn((stageLeft + stageRight) / 2, Physics.GROUND_Y - players[pid].shapeHeight / 2)
+                elseif activeCount == 2 then
+                    players[activePlayers[1]]:spawn(stageLeft, Physics.GROUND_Y - players[activePlayers[1]].shapeHeight / 2)
+                    players[activePlayers[2]]:spawn(stageRight, Physics.GROUND_Y - players[activePlayers[2]].shapeHeight / 2)
                 else
-                    local stageMiddle = (stageLeft + stageRight) / 2
-                    players[1]:spawn(stageLeft, Physics.GROUND_Y - players[1].shapeHeight / 2)
-                    players[2]:spawn(stageMiddle, Physics.GROUND_Y - players[2].shapeHeight / 2)
-                    players[3]:spawn(stageRight, Physics.GROUND_Y - players[3].shapeHeight / 2)
+                    for idx, pid in ipairs(activePlayers) do
+                        local t = (idx - 1) / (activeCount - 1)
+                        local x = stageLeft + t * stageWidth
+                        players[pid]:spawn(x, Physics.GROUND_Y - players[pid].shapeHeight / 2)
+                    end
                 end
+
                 countdownTimer = 3.0
                 countdownValue = 3
                 gameState = "countdown"
@@ -1950,10 +2116,15 @@ function startDemoMode()
     -- Create players: P1 is local human, P2 and P3 are bots
     players = {}
     players[1] = Player.new(1, Config.getControls())
+    -- Set player name from config
+    local configName = Config.getPlayerName()
+    if configName then players[1].name = configName end
     players[2] = Player.new(2, nil)
     players[2].isRemote = false  -- not remote, but AI controlled
+    players[2].name = "Bot 1"
     players[3] = Player.new(3, nil)
     players[3].isRemote = false
+    players[3].name = "Bot 2"
 
     -- Assign random shapes to bots
     local Shapes = require("shapes")
@@ -2066,6 +2237,19 @@ function updateDemoMode(dt)
             addHitPause(0.08)
             addCameraZoom(1.05, 0.25)
         end
+    end
+
+    -- Continuous aiming: update local player aim position every frame
+    local localPlayer = players[1]  -- In demo mode, P1 is always local
+    if localPlayer and localPlayer.life > 0 then
+        local mx, my = love.mouse.getPosition()
+        local gameX = (mx - offsetX) / scaleX
+        local gameY = (my - offsetY) / scaleY
+        local W, H = GAME_WIDTH, GAME_HEIGHT
+        local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
+        local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
+        localPlayer.aimX = worldX
+        localPlayer.aimY = worldY
     end
 
     -- Check for game over

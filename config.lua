@@ -7,12 +7,13 @@ local Config = {}
 -- Default configuration
 local defaultConfig = {
     controlScheme = "wasd",  -- "wasd" or "arrows"
-    playerCount = "3",       -- "2" or "3"
+    playerCount = "3",       -- "2" or "3" (or up to "12")
     serverMode = "false",    -- "true" or "false" (dedicated server / relay mode)
     aimAssist = "true",      -- "true" or "false" (auto-aim at nearest enemy)
     demoInvulnerable = "false", -- "true" or "false" (invulnerable in demo mode)
     musicMuted = "false",    -- "true" or "false" (background music muted)
-    damageNumbers = "true"   -- "true" or "false" (show floating damage numbers)
+    damageNumbers = "true",  -- "true" or "false" (show floating damage numbers)
+    playerName = ""          -- Player's display name (empty = "Player N")
 }
 
 -- IP history (stored separately, not in defaultConfig)
@@ -112,16 +113,16 @@ function Config.getControls()
     return Config.CONTROL_SCHEMES[scheme] or Config.CONTROL_SCHEMES.wasd
 end
 
--- Get player count (2 or 3)
+-- Get player count (2-12)
 function Config.getPlayerCount()
     local val = tonumber(currentConfig.playerCount)
-    if val == 2 then return 2 end
-    return 3
+    if val and val >= 2 and val <= 12 then return val end
+    return 3  -- default
 end
 
--- Set player count
+-- Set player count (2-12)
 function Config.setPlayerCount(count)
-    if count == 2 or count == 3 then
+    if count >= 2 and count <= 12 then
         currentConfig.playerCount = tostring(count)
         Config.save()
     end
@@ -209,6 +210,21 @@ function Config.addIPToHistory(ip)
     -- Save to file
     local contents = table.concat(ipHistory, "\n")
     love.filesystem.write(IP_HISTORY_FILE, contents)
+end
+
+-- Get player name
+function Config.getPlayerName()
+    local name = currentConfig.playerName
+    if name and #name > 0 then
+        return name
+    end
+    return nil  -- nil means use default "Player N"
+end
+
+-- Set player name
+function Config.setPlayerName(name)
+    currentConfig.playerName = name or ""
+    Config.save()
 end
 
 return Config

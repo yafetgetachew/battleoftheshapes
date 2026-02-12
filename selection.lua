@@ -1,5 +1,5 @@
 -- selection.lua
--- Shape selection screen for 2 or 3 players (networked)
+-- Shape selection screen for up to 12 players (networked) - 4x3 grid layout
 
 local Shapes = require("shapes")
 
@@ -12,11 +12,13 @@ local FONT_PATH = "assets/fonts/FredokaOne-Regular.ttf"
 local _titleFont
 local _subFont
 local _statsFont
+local _smallFont
 local function ensureFonts()
     if _titleFont then return end
-    _titleFont = love.graphics.newFont(FONT_PATH, 32)
-    _subFont = love.graphics.newFont(FONT_PATH, 16)
-    _statsFont = love.graphics.newFont(FONT_PATH, 13)
+    _titleFont = love.graphics.newFont(FONT_PATH, 28)
+    _subFont = love.graphics.newFont(FONT_PATH, 14)
+    _statsFont = love.graphics.newFont(FONT_PATH, 11)
+    _smallFont = love.graphics.newFont(FONT_PATH, 10)
 end
 
 function Selection.new(localPlayerId, playerCount)
@@ -25,12 +27,43 @@ function Selection.new(localPlayerId, playerCount)
     self.playerCount = playerCount or 3
     self.choices    = {}
     self.confirmed  = {}
+    self.connected  = {}  -- track which players are connected
     for i = 1, self.playerCount do
         self.choices[i] = 1
         self.confirmed[i] = false
+        self.connected[i] = false
+    end
+    -- Mark host (pid 1) as connected if not server mode
+    if self.localPlayerId >= 1 then
+        self.connected[self.localPlayerId] = true
     end
     self.timer      = 0                -- animation timer
     return setmetatable(self, {__index = Selection})
+end
+
+-- Mark a player as connected
+function Selection:setConnected(playerId, isConnected)
+    if playerId >= 1 and playerId <= self.playerCount then
+        self.connected[playerId] = isConnected
+    end
+end
+
+-- Get count of connected players
+function Selection:getConnectedCount()
+    local count = 0
+    for i = 1, self.playerCount do
+        if self.connected[i] then count = count + 1 end
+    end
+    return count
+end
+
+-- Get count of ready players
+function Selection:getReadyCount()
+    local count = 0
+    for i = 1, self.playerCount do
+        if self.confirmed[i] then count = count + 1 end
+    end
+    return count
 end
 
 function Selection:keypressed(key, controls)
@@ -74,10 +107,16 @@ function Selection:update(dt)
 end
 
 function Selection:isDone()
+    -- Only check connected players - all connected must be confirmed
+    local connectedCount = 0
     for i = 1, self.playerCount do
-        if not self.confirmed[i] then return false end
+        if self.connected[i] then
+            connectedCount = connectedCount + 1
+            if not self.confirmed[i] then return false end
+        end
     end
-    return true
+    -- Need at least 2 connected players to start
+    return connectedCount >= 2
 end
 
 function Selection:getChoices()
@@ -98,13 +137,14 @@ function Selection:isLocalConfirmed()
     return self.confirmed[self.localPlayerId]
 end
 
-function Selection:draw(gameWidth, gameHeight, controls)
+function Selection:draw(gameWidth, gameHeight, controls, players)
     local W = gameWidth or 1280
     local H = gameHeight or 720
-	ensureFonts()
-	local titleFont = _titleFont
-	local subFont = _subFont
-	local statsFont = _statsFont
+    ensureFonts()
+    local titleFont = _titleFont
+    local subFont = _subFont
+    local statsFont = _statsFont
+    local smallFont = _smallFont
 
     -- Background
     love.graphics.setColor(0.08, 0.08, 0.14)
@@ -112,99 +152,137 @@ function Selection:draw(gameWidth, gameHeight, controls)
 
     -- Title
     love.graphics.setColor(1, 1, 1)
-	love.graphics.setFont(titleFont)
-    love.graphics.printf("B.O.T.S - Battle of the Shapes", 0, 30, W, "center")
+    love.graphics.setFont(titleFont)
+    love.graphics.printf("B.O.T.S - Battle of the Shapes", 0, 20, W, "center")
 
-	love.graphics.setFont(subFont)
-    love.graphics.setColor(0.7, 0.7, 0.7)
-    love.graphics.printf("Select Your Shape", 0, 72, W, "center")
-
-    -- Draw panels for each player
-    local panelW = self.playerCount == 2 and 450 or 370
-    local panelH = 420
-    local panelY = 110
-    local gap = 20
-    local totalW = panelW * self.playerCount + gap * (self.playerCount - 1)
-    local startX = (W - totalW) / 2
-    local labels = {}
-    for i = 1, self.playerCount do
-        labels[i] = "Player " .. i .. " (Waiting...)"
+    -- Status line: X/Y players ready
+    love.graphics.setFont(subFont)
+    local connectedCount = self:getConnectedCount()
+    local readyCount = self:getReadyCount()
+    if connectedCount < 2 then
+        love.graphics.setColor(1, 0.6, 0.3)
+        love.graphics.printf("Waiting for players... (" .. connectedCount .. "/2 minimum)", 0, 52, W, "center")
+    else
+        love.graphics.setColor(0.7, 0.9, 0.7)
+        love.graphics.printf(readyCount .. "/" .. connectedCount .. " players ready", 0, 52, W, "center")
     end
-    -- Show actual configured controls
+
+    -- Controls hint for local player
     local leftName = (controls and controls.left) or "A"
     local rightName = (controls and controls.right) or "D"
     local confirmName = (controls and controls.jump) or "Space"
-	    if self.localPlayerId >= 1 and self.localPlayerId <= self.playerCount then
-	        labels[self.localPlayerId] = "Player " .. self.localPlayerId .. " (" .. string.upper(leftName) .. "/" .. string.upper(rightName) .. " + " .. string.upper(confirmName) .. ")"
-	    end
+    love.graphics.setFont(smallFont)
+    love.graphics.setColor(0.5, 0.5, 0.6)
+    love.graphics.printf(string.upper(leftName) .. "/" .. string.upper(rightName) .. " select • " .. string.upper(confirmName) .. " confirm", 0, 72, W, "center")
+
+    -- 4x3 grid layout
+    local cols = 4
+    local rows = 3
+    local cellW = 280
+    local cellH = 190
+    local gapX = 15
+    local gapY = 12
+    local totalW = cols * cellW + (cols - 1) * gapX
+    local totalH = rows * cellH + (rows - 1) * gapY
+    local startX = (W - totalW) / 2
+    local startY = 95
 
     for p = 1, self.playerCount do
-        local px = startX + (p - 1) * (panelW + gap)
-        -- Panel background
-        love.graphics.setColor(0.12, 0.12, 0.22, 0.9)
-        love.graphics.rectangle("fill", px, panelY, panelW, panelH, 12, 12)
+        local col = (p - 1) % cols
+        local row = math.floor((p - 1) / cols)
+        local px = startX + col * (cellW + gapX)
+        local py = startY + row * (cellH + gapY)
 
-        -- Border (highlight if confirmed, extra bright if local player)
-        if self.confirmed[p] then
-            love.graphics.setColor(0.3, 1.0, 0.4, 0.8)
-        elseif p == self.localPlayerId then
-            love.graphics.setColor(0.5, 0.5, 0.8, 0.9)
+        -- Cell background
+        if self.connected[p] then
+            love.graphics.setColor(0.12, 0.12, 0.22, 0.95)
         else
-            love.graphics.setColor(0.3, 0.3, 0.5, 0.6)
+            love.graphics.setColor(0.08, 0.08, 0.12, 0.6)
         end
-        love.graphics.setLineWidth(2)
-        love.graphics.rectangle("line", px, panelY, panelW, panelH, 12, 12)
+        love.graphics.rectangle("fill", px, py, cellW, cellH, 8, 8)
 
-        -- Player label
-        love.graphics.setColor(1, 1, 1)
-        love.graphics.setFont(subFont)
-        love.graphics.printf(labels[p], px, panelY + 12, panelW, "center")
-
-        -- Draw the currently selected shape (large preview)
-        local shapeKey = Shapes.order[self.choices[p]]
-        local def = Shapes.get(shapeKey)
-        local cx = px + panelW / 2
-        local cy = panelY + 150
-        local bobOffset = math.sin(self.timer * 2 + p) * 6
-        Shapes.drawShape(shapeKey, cx, cy + bobOffset, 1.8)
-
-        -- Shape name
-        love.graphics.setColor(1, 1, 1)
-		love.graphics.setFont(subFont)
-        love.graphics.printf(def.name, px, panelY + 210, panelW, "center")
-
-        -- Stats
-        love.graphics.setFont(statsFont)
-        local sy = panelY + 235
-        love.graphics.setColor(0.9, 0.3, 0.3)
-        love.graphics.printf("Life: " .. def.life, px + 30, sy, panelW - 60, "left")
-        love.graphics.setColor(0.4, 0.7, 1.0)
-        love.graphics.printf("Will: " .. def.will, px + 30, sy, panelW - 60, "right")
-        love.graphics.setColor(0.8, 0.8, 0.8)
-        love.graphics.printf("Speed: " .. def.speed, px + 30, sy + 20, panelW - 60, "left")
-        love.graphics.printf("Jump: " .. math.abs(def.jumpForce), px + 30, sy + 20, panelW - 60, "right")
-
-        -- Description
-        love.graphics.setColor(0.6, 0.6, 0.6)
-        love.graphics.printf(def.description, px + 20, sy + 48, panelW - 40, "center")
-
-        -- Navigation arrows (only for local player)
-        if not self.confirmed[p] and p == self.localPlayerId then
-            love.graphics.setColor(1, 1, 1, 0.6)
-            love.graphics.polygon("fill",
-                px + 20, panelY + 150,
-                px + 38, panelY + 137,
-                px + 38, panelY + 163)
-            love.graphics.polygon("fill",
-                px + panelW - 20, panelY + 150,
-                px + panelW - 38, panelY + 137,
-                px + panelW - 38, panelY + 163)
-        end
-
-        -- Confirmed badge
+        -- Border
         if self.confirmed[p] then
-            love.graphics.setColor(0.3, 1.0, 0.4)
-            love.graphics.printf("✓ READY", px, panelY + panelH - 36, panelW, "center")
+            love.graphics.setColor(0.3, 1.0, 0.4, 0.9)
+        elseif p == self.localPlayerId then
+            love.graphics.setColor(0.6, 0.6, 1.0, 1.0)
+        elseif self.connected[p] then
+            love.graphics.setColor(0.4, 0.4, 0.6, 0.7)
+        else
+            love.graphics.setColor(0.2, 0.2, 0.3, 0.4)
+        end
+        love.graphics.setLineWidth(p == self.localPlayerId and 3 or 2)
+        love.graphics.rectangle("line", px, py, cellW, cellH, 8, 8)
+
+        if self.connected[p] then
+            -- Player name
+            love.graphics.setFont(subFont)
+            love.graphics.setColor(1, 1, 1)
+            local playerName = "Player " .. p
+            if players and players[p] and players[p].name then
+                playerName = players[p].name
+            end
+            love.graphics.printf(playerName, px, py + 8, cellW, "center")
+
+            -- Shape preview
+            local shapeKey = Shapes.order[self.choices[p]]
+            local def = Shapes.get(shapeKey)
+            local cx = px + cellW / 2
+            local cy = py + 75
+            local bobOffset = math.sin(self.timer * 2.5 + p) * 4
+            Shapes.drawShape(shapeKey, cx, cy + bobOffset, 1.2)
+
+            -- Shape name
+            love.graphics.setColor(0.9, 0.9, 0.9)
+            love.graphics.setFont(statsFont)
+            love.graphics.printf(def.name, px, py + 115, cellW, "center")
+
+            -- Stats (compact)
+            love.graphics.setFont(smallFont)
+            local sy = py + 132
+            love.graphics.setColor(0.9, 0.4, 0.4)
+            love.graphics.printf("HP:" .. def.life, px + 8, sy, 60, "left")
+            love.graphics.setColor(0.4, 0.7, 1.0)
+            love.graphics.printf("WP:" .. def.will, px + 68, sy, 60, "left")
+            love.graphics.setColor(0.7, 0.7, 0.7)
+            love.graphics.printf("SPD:" .. def.speed, px + 128, sy, 70, "left")
+            love.graphics.printf("JMP:" .. math.abs(def.jumpForce), px + 198, sy, 80, "left")
+
+            -- Navigation arrows (local player only, not confirmed)
+            if p == self.localPlayerId and not self.confirmed[p] then
+                love.graphics.setColor(1, 1, 1, 0.5)
+                love.graphics.polygon("fill",
+                    px + 15, cy,
+                    px + 28, cy - 10,
+                    px + 28, cy + 10)
+                love.graphics.polygon("fill",
+                    px + cellW - 15, cy,
+                    px + cellW - 28, cy - 10,
+                    px + cellW - 28, cy + 10)
+            end
+
+            -- Ready badge or waiting indicator
+            if self.confirmed[p] then
+                love.graphics.setColor(0.3, 1.0, 0.4)
+                love.graphics.setFont(statsFont)
+                love.graphics.printf("✓ READY", px, py + cellH - 25, cellW, "center")
+            elseif p == self.localPlayerId then
+                love.graphics.setColor(0.8, 0.8, 0.4, 0.8)
+                love.graphics.setFont(smallFont)
+                love.graphics.printf("Press " .. string.upper(confirmName) .. " to ready", px, py + cellH - 22, cellW, "center")
+            else
+                love.graphics.setColor(0.5, 0.5, 0.5)
+                love.graphics.setFont(smallFont)
+                love.graphics.printf("Selecting...", px, py + cellH - 22, cellW, "center")
+            end
+        else
+            -- Empty slot
+            love.graphics.setFont(subFont)
+            love.graphics.setColor(0.3, 0.3, 0.4, 0.6)
+            love.graphics.printf("Slot " .. p, px, py + cellH/2 - 20, cellW, "center")
+            love.graphics.setFont(smallFont)
+            love.graphics.setColor(0.25, 0.25, 0.3, 0.5)
+            love.graphics.printf("Waiting for player...", px, py + cellH/2, cellW, "center")
         end
     end
 end

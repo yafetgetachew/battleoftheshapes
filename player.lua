@@ -9,6 +9,16 @@ local Config      = require("config")
 local Player = {}
 Player.__index = Player
 
+-- Font cache for name rendering
+local FONT_PATH = "assets/fonts/FredokaOne-Regular.ttf"
+local _nameFont = nil
+local function getNameFont()
+    if not _nameFont then
+        _nameFont = love.graphics.newFont(FONT_PATH, 14)
+    end
+    return _nameFont
+end
+
 -- Callback for damage visualization (set by main.lua)
 -- function(x, y, damage) called when player receives damage via network sync
 Player.onDamageReceived = nil
@@ -33,9 +43,10 @@ Player.PROJECTILE_KNOCKBACK = 180  -- knockback velocity when hit by projectile
 
 function Player.new(id, controls)
     local self = setmetatable({}, Player)
-    self.id          = id               -- 1, 2, or 3
+    self.id          = id               -- 1, 2, ... up to 12
     self.controls    = controls         -- {left=key, right=key, jump=key, cast=key} or nil for remote
     self.isRemote    = false            -- true for network-controlled players
+    self.name        = "Player " .. id  -- display name (can be set via network or config)
     self.shapeKey    = nil              -- set after selection
     self.x           = 0
     self.y           = 0
@@ -545,6 +556,24 @@ function Player:draw(isGameOver)
                 love.graphics.rectangle("fill", self.x - w/2, self.y - h/2, w, h)
             end
         end
+    end
+
+    -- Draw player name above the shape
+    if self.name and #self.name > 0 then
+        local nameFont = getNameFont()
+        love.graphics.setFont(nameFont)
+        local nameY = self.y - self.shapeHeight / 2 - 20
+        -- Background shadow for readability
+        love.graphics.setColor(0, 0, 0, 0.5)
+        love.graphics.printf(self.name, self.x - 100 + 1, nameY + 1, 200, "center")
+        -- Name text (white with slight tint based on player ID)
+        local r, g, b = 1, 1, 1
+        if self.id == 1 then r, g, b = 1, 0.9, 0.8
+        elseif self.id == 2 then r, g, b = 0.8, 0.9, 1
+        elseif self.id == 3 then r, g, b = 0.9, 1, 0.8
+        end
+        love.graphics.setColor(r, g, b, 0.9)
+        love.graphics.printf(self.name, self.x - 100, nameY, 200, "center")
     end
 
     -- Draw a small directional indicator (arrow under the shape)

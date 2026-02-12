@@ -19,7 +19,7 @@ local peerToId = {}       -- peer userdata -> playerId (reverse lookup)
 local serverPeer = nil
 local localPlayerId = 1
 local incomingMessages = {}
-local maxPlayers = 3      -- set by host on startHost()
+local maxPlayers = 12     -- set by host on startHost()
 local dedicatedServer = false  -- true = host is relay only, no local player
 
 
