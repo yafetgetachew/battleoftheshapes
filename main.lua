@@ -298,9 +298,14 @@ function love.load()
         addHitPause(0.06)  -- Extra 60ms on kill
     end
 
-    -- Set up player damage callback for network damage numbers
+    -- Set up player damage callback for network damage numbers + juice
     Player.onDamageReceived = function(x, y, damage)
         spawnDamageNumber(x, y, damage)
+        -- Add juice effects for clients (who don't get direct collision callbacks)
+        -- Use generic values that feel good for most hits
+        addHitPause(0.06)
+        addScreenShake(5, 0.2, 30)
+        Sounds.play("player_hurt") -- Ensure hurt sound plays if not already handled
     end
 
     -- Set up lightning hit callbacks for juice effects

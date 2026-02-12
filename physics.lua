@@ -141,66 +141,78 @@ function Physics.resolvePlayerCollision(p1, p2, dt)
     local Player = require("player")
 
     -- ── Dash collision ──
-    if isAuthority and (p1.isDashing or p2.isDashing) then
+    if (p1.isDashing or p2.isDashing) then
         local dasher = p1.isDashing and p1 or p2
         local target = p1.isDashing and p2 or p1
 
-        local dasherPrevLife = dasher.life
-        local targetPrevLife = target.life
-
-        -- Apply damage to dasher (unless invulnerable)
-        if not dasher.invulnerable then
-            local dmg = Player.DASH_SELF_DAMAGE
-            if dasher.armor and dasher.armor > 0 then
-                local absorbed = math.min(dasher.armor, dmg)
-                dmg = dmg - absorbed
-                dasher.armor = dasher.armor - absorbed
-                if dasher.armor <= 0 then dasher.armor = 0 end
-            end
-            dasher.life = math.max(0, dasher.life - dmg)
-            dasher.hitFlash = 0.25
-        end
-
-        -- Apply damage to target (unless invulnerable)
-        if not target.invulnerable then
-            local dmg = Player.DASH_TARGET_DAMAGE
-            if target.armor and target.armor > 0 then
-                local absorbed = math.min(target.armor, dmg)
-                dmg = dmg - absorbed
-                target.armor = target.armor - absorbed
-                if target.armor <= 0 then target.armor = 0 end
-            end
-            target.life = math.max(0, target.life - dmg)
-            target.hitFlash = 0.25
-        end
-
-        -- Knockback the target
-        target.vx = Player.DASH_KNOCKBACK * dasher.dashDir
-
-        -- End the dash
-        dasher.isDashing = false
-        dasher.dashTimer = 0
-        dasher.vx = dasher.speed * dasher.dashDir * 0.2
-
-        -- Record impact for particle effects and sound
-        local impactX = (dasher.x + target.x) / 2
-        local impactY = (dasher.y + target.y) / 2
-        table.insert(Physics._dashImpacts, {x = impactX, y = impactY})
-        Sounds.play("dash_impact")
-
-        -- Trigger juice callback for damage numbers
-        if Physics.onDashHit then
-            local dasherDmg = dasherPrevLife - dasher.life
-            local targetDmg = targetPrevLife - target.life
-            if dasherDmg > 0 then
-                Physics.onDashHit(dasher.x, dasher.y, dasherDmg)
-            end
-            if targetDmg > 0 then
-                Physics.onDashHit(target.x, target.y, targetDmg)
+        -- Visuals (Impact + Sound)
+        -- Client: only if not played yet for this dash instance
+        if isAuthority or not dasher.dashImpactPlayed then
+            -- Record impact for particle effects and sound
+            local impactX = (dasher.x + target.x) / 2
+            local impactY = (dasher.y + target.y) / 2
+            table.insert(Physics._dashImpacts, {x = impactX, y = impactY})
+            Sounds.play("dash_impact")
+            
+            if not isAuthority then
+                dasher.dashImpactPlayed = true
             end
         end
 
-        return  -- skip normal collision resolution after dash impact
+        -- Gameplay (Damage, Knockback, End Dash) - Authority Only
+        if isAuthority then
+            local dasherPrevLife = dasher.life
+            local targetPrevLife = target.life
+
+            -- Apply damage to dasher (unless invulnerable)
+            if not dasher.invulnerable then
+                local dmg = Player.DASH_SELF_DAMAGE
+                if dasher.armor and dasher.armor > 0 then
+                    local absorbed = math.min(dasher.armor, dmg)
+                    dmg = dmg - absorbed
+                    dasher.armor = dasher.armor - absorbed
+                    if dasher.armor <= 0 then dasher.armor = 0 end
+                end
+                dasher.life = math.max(0, dasher.life - dmg)
+                dasher.hitFlash = 0.25
+            end
+
+            -- Apply damage to target (unless invulnerable)
+            if not target.invulnerable then
+                local dmg = Player.DASH_TARGET_DAMAGE
+                if target.armor and target.armor > 0 then
+                    local absorbed = math.min(target.armor, dmg)
+                    dmg = dmg - absorbed
+                    target.armor = target.armor - absorbed
+                    if target.armor <= 0 then target.armor = 0 end
+                end
+                target.life = math.max(0, target.life - dmg)
+                target.hitFlash = 0.25
+            end
+
+            -- Knockback the target
+            target.vx = Player.DASH_KNOCKBACK * dasher.dashDir
+
+            -- End the dash
+            dasher.isDashing = false
+            dasher.dashTimer = 0
+            dasher.vx = dasher.speed * dasher.dashDir * 0.2
+
+            -- Trigger juice callback for damage numbers
+            if Physics.onDashHit then
+                local dasherDmg = dasherPrevLife - dasher.life
+                local targetDmg = targetPrevLife - target.life
+                if dasherDmg > 0 then
+                    Physics.onDashHit(dasher.x, dasher.y, dasherDmg)
+                end
+                if targetDmg > 0 then
+                    Physics.onDashHit(target.x, target.y, targetDmg)
+                end
+            end
+
+            return  -- skip normal collision check after dash impact
+        end
+        -- Clients fall through to normal collision resolution
     end
 
     -- Apply collision damage to the lower player (higher Y = lower on screen)

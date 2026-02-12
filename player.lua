@@ -420,6 +420,9 @@ function Player:applyNetState(state)
     if state.damageBoost ~= nil then self.damageBoost = state.damageBoost end
     if state.damageBoostShots ~= nil then self.damageBoostShots = state.damageBoostShots end
     if state.isDashing ~= nil then
+        if state.isDashing and not self.isDashing then
+            self.dashImpactPlayed = false
+        end
         self.isDashing = state.isDashing
         if state.isDashing then
             self.dashTimer = Player.DASH_DURATION
