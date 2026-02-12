@@ -181,8 +181,8 @@ function Network.encodeTick(playerStates, lightningState, dropboxState)
     for _, ps in ipairs(playerStates) do
         parts[#parts + 1] = ps.pid .. "," .. ps.x .. "," .. ps.y .. ","
             .. ps.vx .. "," .. ps.vy .. "," .. ps.life .. "," .. ps.will .. ","
-            .. ps.facing .. "," .. (ps.armor and 1 or 0) .. ","
-            .. (ps.dmgBoost and 1 or 0) .. "," .. (ps.dmgShots or 0)
+            .. ps.facing .. "," .. (ps.armor or 0) .. ","
+            .. (ps.dmgBoost or 0) .. "," .. (ps.dmgShots or 0)
     end
 
     -- Lightning section
@@ -310,8 +310,8 @@ function Network.decodeTick(raw)
                     life = tonumber(vals[6]),
                     will = tonumber(vals[7]),
                     facing = tonumber(vals[8]),
-                    armor = tonumber(vals[9]) == 1,
-                    dmgBoost = tonumber(vals[10]) == 1,
+                    armor = tonumber(vals[9]) or 0,
+                    dmgBoost = tonumber(vals[10]) or 0,
                     dmgShots = tonumber(vals[11]) or 0
                 }
             end
