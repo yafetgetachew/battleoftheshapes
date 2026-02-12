@@ -889,8 +889,11 @@ function startCountdown()
         for i = 1, maxPlayers do
             data["s" .. i] = choices[i]
         end
-        -- Also send which players are active
-        data.activePlayers = activePlayers
+        -- Send active player list as flat keys (ap1=pid, ap2=pid, apc=count)
+        data.apc = activeCount
+        for idx, pid in ipairs(activePlayers) do
+            data["ap" .. idx] = pid
+        end
         Network.send("start_countdown", data, true)
     end
 end
@@ -1597,11 +1600,19 @@ function processNetworkMessages()
                 Projectiles.clear()
                 Abilities.clear()
 
-                -- Get active players from host or fall back to connected players
-                local activePlayers = data.activePlayers
-                if not activePlayers then
-                    -- Fallback: find connected players from selection
-                    activePlayers = {}
+                -- Get active players from host (flat keys: apc=count, ap1=pid, ap2=pid, ...)
+                local activePlayers = {}
+                local apc = data.apc
+                if apc and apc > 0 then
+                    for idx = 1, apc do
+                        local pid = data["ap" .. idx]
+                        if pid then
+                            table.insert(activePlayers, pid)
+                        end
+                    end
+                end
+                -- Fallback: find connected players from selection
+                if #activePlayers == 0 then
                     for i = 1, maxPlayers do
                         if selection and selection.connected[i] then
                             table.insert(activePlayers, i)
