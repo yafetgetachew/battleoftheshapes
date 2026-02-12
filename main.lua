@@ -72,20 +72,62 @@ local winner = nil
 -- Scaling and resolution
 local GAME_WIDTH = 1280
 local GAME_HEIGHT = 720
-local scaleX, scaleY, offsetX, offsetY = 1, 1, 0, 0
+-- Global scale factors (exported for other modules)
+GLOBAL_SCALE = 1
+GLOBAL_SCALE_X, GLOBAL_SCALE_Y = 1, 1
+local offsetX, offsetY = 0, 0
+
+-- Helper: Convert window coordinates to game coordinates
+local function windowToGame(x, y)
+    return (x - offsetX) / GLOBAL_SCALE, (y - offsetY) / GLOBAL_SCALE
+end
+
+-- Helper: Check if mouse is over a rectangle
+local function isMouseOver(mx, my, x, y, w, h)
+    return mx >= x and mx <= x + w and my >= y and my <= y + h
+end
 
 -- Fun font path (Fredoka One – bubbly rounded display font, OFL licensed)
 local FONT_PATH = "assets/fonts/FredokaOne-Regular.ttf"
 
 -- Font cache: avoid allocating new Font objects every frame.
+-- Font cache: avoid allocating new Font objects every frame.
 local _fontCache = {}
 local function getFont(size)
-    local f = _fontCache[size]
+    -- Adjust size based on global scale for crisp text
+    local scaledSize = math.floor(size * GLOBAL_SCALE)
+    if scaledSize < 1 then scaledSize = 1 end
+    
+    local f = _fontCache[scaledSize]
     if not f then
-        f = love.graphics.newFont(FONT_PATH, size)
-        _fontCache[size] = f
+        f = love.graphics.newFont(FONT_PATH, scaledSize)
+        _fontCache[scaledSize] = f
     end
     return f
+end
+
+-- Clear font cache (call on resize)
+local function clearFontCache()
+    _fontCache = {}
+    -- Also clear other modules' font caches
+    Player.clearFontCache()
+    HUD.clearFontCache()
+    Selection.clearFontCache()
+    Dropbox.clearFontCache()
+end
+
+-- Helper to draw text with inverse scaling for sharpness
+-- Should be used for all UI text drawn under GLOBAL_SCALE
+function DrawSharpText(text, x, y, limit, align)
+    love.graphics.push()
+    love.graphics.translate(x, y)
+    love.graphics.scale(1/GLOBAL_SCALE, 1/GLOBAL_SCALE)
+    if limit then
+        love.graphics.printf(text, 0, 0, limit * GLOBAL_SCALE, align)
+    else
+        love.graphics.print(text, 0, 0)
+    end
+    love.graphics.pop()
 end
 
 -- ─────────────────────────────────────────────
@@ -250,12 +292,67 @@ local function drawDamageNumbers()
             r, g, b = 1, 0.5, 0.2  -- Orange for medium
         end
 
+        local baseSize = 18 * scale
+        local font = getFont(baseSize)
+        
+        love.graphics.push()
+        -- Inverse scale for sharp text
+        love.graphics.translate(dn.x, dn.y)
+        love.graphics.scale(1/GLOBAL_SCALE, 1/GLOBAL_SCALE)
+        
         love.graphics.setColor(0, 0, 0, alpha * 0.5)
-        love.graphics.setFont(getFont(math.floor(18 * scale)))
-        love.graphics.printf(tostring(dn.value), dn.x - 50 + 1, dn.y + 1, 100, "center")
+        love.graphics.setFont(font)
+        -- Note: coordinates are local to the translate now, so we draw relative to 0,0 matched to window pixels
+        -- But wait, dn.x/y are in game coordinates. 
+        -- When we draw in world space, the transform is:
+        -- Translate(offsetX, offsetY) -> Scale(GLOBAL_SCALE) -> Translate(Camera...) -> Draw
+        -- If we want sharp text in world space, we need the font to be size * GLOBAL_SCALE * CameraZoom?
+        -- Actually, for damage numbers, simpler approach:
+        -- They are drawn inside the camera transform.
+        -- So the net scale at drawing time is GLOBAL_SCALE * cameraZoom.
+        -- We should ideally generate fonts based on that, but camera zoom changes dynamically.
+        -- For now, let's just use GLOBAL_SCALE and ignore zoom for font generation (it's close to 1.0 usually).
+        
+        -- To draw sharp text:
+        -- 1. Font size = DesiredSize * TotalScale
+        -- 2. Draw Scale = 1 / TotalScale
+        
+        -- However, we are inside a complex transform stack.
+        -- Let's just use the global scale for font quality.
+        -- We won't apply inverse scale in world space because that would fight the camera zoom.
+        -- Instead, we simply rely on the fact that we created a large font.
+        -- Wait, if we use a large font (size * scale) and draw it normally, it will be huge.
+        -- We MUST scale it down by (1/scale).
+        
+        love.graphics.scale(1/GLOBAL_SCALE, 1/GLOBAL_SCALE) -- Only undo the global scale (monitor DPI/window size)
+        -- We do NOT undo camera zoom.
+        
+        -- Text is drawn at 0,0 relative to push/translate.
+        -- Original code: printf at (dn.x - 50, dn.y). 
+        -- Since we translated to dn.x, dn.y, we draw at (-50 * GLOBAL_SCALE, 0).
+        -- Wait, if we scale down, we need to draw at larger coordinates? 
+        -- No.
+        -- Transform:
+        -- 1. Translate(dn.x, dn.y) (Game coords)
+        -- 2. Scale(1/GLOBAL_SCALE) -> This shrinks the following drawing command.
+        -- If we draw text at (0,0), it will be tiny.
+        -- BUT, we are using a HUGE font (Size * GLOBAL_SCALE).
+        -- So Huge Font * Tiny Scale = Normal Size on Screen (but high res).
+        
+        -- The offset needs to be scaled too?
+        -- logic: 
+        -- original: printf("text", x - 50, y, 100, "center")
+        -- new: translate(x,y), scale(1/S), printf("text", -50 * S, 0, 100 * S, "center")
+        
+        local offset = 50 * GLOBAL_SCALE
+        local width = 100 * GLOBAL_SCALE
+        
+        love.graphics.printf(tostring(dn.value), -offset + 1, 1, width, "center")
 
         love.graphics.setColor(r, g, b, alpha)
-        love.graphics.printf(tostring(dn.value), dn.x - 50, dn.y, 100, "center")
+        love.graphics.printf(tostring(dn.value), -offset, 0, width, "center")
+        
+        love.graphics.pop()
     end
 end
 
@@ -329,19 +426,24 @@ function love.load()
 end
 
 -- Update scaling factors for proper aspect ratio
+-- Update scaling factors for proper aspect ratio
 function updateScaling()
     local windowWidth, windowHeight = love.graphics.getDimensions()
-    scaleX = windowWidth / GAME_WIDTH
-    scaleY = windowHeight / GAME_HEIGHT
+    GLOBAL_SCALE_X = windowWidth / GAME_WIDTH
+    GLOBAL_SCALE_Y = windowHeight / GAME_HEIGHT
 
     -- Use uniform scaling to maintain aspect ratio
-    local scale = math.min(scaleX, scaleY)
-    scaleX = scale
-    scaleY = scale
+    local scale = math.min(GLOBAL_SCALE_X, GLOBAL_SCALE_Y)
+    GLOBAL_SCALE_X = scale
+    GLOBAL_SCALE_Y = scale
+    GLOBAL_SCALE = scale -- Export for other modules
 
     -- Calculate letterbox/pillarbox offsets
-    offsetX = (windowWidth - (GAME_WIDTH * scaleX)) / 2
-    offsetY = (windowHeight - (GAME_HEIGHT * scaleY)) / 2
+    offsetX = (windowWidth - (GAME_WIDTH * GLOBAL_SCALE)) / 2
+    offsetY = (windowHeight - (GAME_HEIGHT * GLOBAL_SCALE)) / 2
+    
+    -- Clear font caches as scale has changed
+    clearFontCache()
 end
 
 function love.resize(w, h)
@@ -502,8 +604,8 @@ function love.update(dt)
             local localPlayer = getLocalPlayer()
             if localPlayer and localPlayer.life > 0 then
                  local mx, my = love.mouse.getPosition()
-                 local gameX = (mx - offsetX) / scaleX
-                 local gameY = (my - offsetY) / scaleY
+                 local gameX = (mx - offsetX) / GLOBAL_SCALE
+                 local gameY = (my - offsetY) / GLOBAL_SCALE
                  local W, H = GAME_WIDTH, GAME_HEIGHT
                  local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
                  local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
@@ -575,10 +677,11 @@ function love.draw()
     love.graphics.push()
 
     -- Get frequency-based screen shake offset
+    -- Get frequency-based screen shake offset
     local shakeX, shakeY = getScreenShakeOffset()
 
     love.graphics.translate(offsetX + shakeX, offsetY + shakeY)
-    love.graphics.scale(scaleX, scaleY)
+    love.graphics.scale(GLOBAL_SCALE, GLOBAL_SCALE)
 
     local W = GAME_WIDTH
     local H = GAME_HEIGHT
@@ -597,7 +700,7 @@ function love.draw()
             -- Server mode overlay on selection screen
 	        love.graphics.setFont(getFont(16))
             love.graphics.setColor(1, 1, 0.4, 0.9)
-            love.graphics.printf("SERVER MODE — " .. menuStatus, 0, H - 40, W, "center")
+            DrawSharpText("SERVER MODE — " .. menuStatus, 0, H - 40, W, "center")
         end
     else
         -- ── Sky gradient ──
@@ -773,8 +876,8 @@ function love.keypressed(key)
                 -- Actually easier: World = (Screen - Center) / Zoom + Center + Camera - Offset
                 
                 -- Step 1: Undo letterboxing/scaling
-                local gameX = (mx - offsetX) / scaleX
-                local gameY = (my - offsetY) / scaleY
+                local gameX = (mx - offsetX) / GLOBAL_SCALE
+                local gameY = (my - offsetY) / GLOBAL_SCALE
                 
                 -- Step 2: Undo camera zoom/pan
                 local W, H = GAME_WIDTH, GAME_HEIGHT
@@ -790,8 +893,8 @@ function love.keypressed(key)
             if key == localPlayer.controls.special then
                 -- Mouse aiming for special ability
                 local mx, my = love.mouse.getPosition()
-                local gameX = (mx - offsetX) / scaleX
-                local gameY = (my - offsetY) / scaleY
+                local gameX = (mx - offsetX) / GLOBAL_SCALE
+                local gameY = (my - offsetY) / GLOBAL_SCALE
                 local W, H = GAME_WIDTH, GAME_HEIGHT
                 local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
                 local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
@@ -939,7 +1042,7 @@ function drawCountdown(W, H)
     love.graphics.setColor(1, 1, 1, 0.9)
 
     local text = countdownValue > 0 and tostring(countdownValue) or "FIGHT!"
-    love.graphics.printf(text, 0, H / 2 - 50, W, "center")
+    DrawSharpText(text, 0, H / 2 - 50, W, "center")
 end
 
 function drawControlsHint(W, H)
@@ -947,7 +1050,10 @@ function drawControlsHint(W, H)
     love.graphics.setColor(1, 1, 1, 0.25)
     local pid = Network.getLocalPlayerId()
     local hint = "P" .. pid .. ": A/D move (double-tap dash) · Space jump · W cast · E special    |    ESC menu"
-    love.graphics.printf(hint, 0, H - 22, W, "center")
+    if Config.getControlScheme() == "arrows" then
+        hint = "Controls: Arrows to Move • Enter to Jump • Mouse to Aim/Shoot"
+    end
+    DrawSharpText(hint, 0, H - 22, W, "center")
 end
 
 function drawServerHint(W, H)
@@ -955,14 +1061,14 @@ function drawServerHint(W, H)
     love.graphics.setColor(1, 1, 0.4, 0.35)
     local connected = Network.getConnectedCount() - 1  -- subtract host itself
     local hint = "SERVER MODE — " .. connected .. "/" .. maxPlayers .. " players    |    ESC menu"
-    love.graphics.printf(hint, 0, H - 22, W, "center")
+    DrawSharpText(hint, 0, H - 22, W, "center")
 end
 
 function drawDemoHint(W, H)
 	love.graphics.setFont(getFont(11))
     love.graphics.setColor(0.4, 1, 0.6, 0.35)
     local hint = "DEMO MODE — P1: A/D move (double-tap dash) · Space jump · W cast · E special    |    ESC menu"
-    love.graphics.printf(hint, 0, H - 22, W, "center")
+    DrawSharpText(hint, 0, H - 22, W, "center")
 end
 
 -- ─────────────────────────────────────────────
@@ -976,17 +1082,17 @@ function drawSplash(W, H)
     local pulse = 0.7 + 0.3 * math.sin(splashTimer * 2.5)
     love.graphics.setFont(getFont(64))
     love.graphics.setColor(1.0, 0.85, 0.2, pulse)
-    love.graphics.printf("BATTLE OF THE SHAPES", 0, H / 2 - 80, W, "center")
+    DrawSharpText("BATTLE OF THE SHAPES", 0, H / 2 - 80, W, "center")
 
     love.graphics.setFont(getFont(28))
     love.graphics.setColor(0.7, 0.7, 0.9, pulse * 0.8)
-    love.graphics.printf("B.O.T.S", 0, H / 2 + 10, W, "center")
+    DrawSharpText("B.O.T.S", 0, H / 2 + 10, W, "center")
 
     if splashTimer > 1.0 then
         love.graphics.setFont(getFont(18))
         local blink = 0.4 + 0.6 * math.sin(splashTimer * 4)
         love.graphics.setColor(1, 1, 1, blink)
-        love.graphics.printf("Press any key to continue", 0, H / 2 + 80, W, "center")
+        DrawSharpText("Press any key to continue", 0, H / 2 + 80, W, "center")
     end
 end
 
@@ -1027,7 +1133,7 @@ function drawMenu(W, H)
 
 	love.graphics.setFont(getFont(42))
     love.graphics.setColor(1.0, 0.85, 0.2)
-    love.graphics.printf("B.O.T.S", 0, 80, W, "center")
+    DrawSharpText("B.O.T.S", 0, 80, W, "center")
 
 	love.graphics.setFont(getFont(18))
     love.graphics.setColor(0.7, 0.7, 0.9)
@@ -1036,7 +1142,7 @@ function drawMenu(W, H)
     if Config.getServerMode() then
         subtitle = subtitle .. " (Server Mode)"
     end
-    love.graphics.printf(subtitle, 0, 140, W, "center")
+    DrawSharpText(subtitle, 0, 140, W, "center")
 
 	love.graphics.setFont(getFont(28))
     local menuY = 240
@@ -1045,10 +1151,10 @@ function drawMenu(W, H)
     for i, opt in ipairs(options) do
         if i == menuChoice then
             love.graphics.setColor(1.0, 1.0, 0.4)
-            love.graphics.printf("> " .. opt .. " <", 0, menuY + (i - 1) * 50, W, "center")
+            DrawSharpText("> " .. opt .. " <", 0, menuY + (i - 1) * 50, W, "center")
         else
             love.graphics.setColor(0.6, 0.6, 0.6)
-            love.graphics.printf(opt, 0, menuY + (i - 1) * 50, W, "center")
+            DrawSharpText(opt, 0, menuY + (i - 1) * 50, W, "center")
         end
     end
 
@@ -1056,11 +1162,11 @@ function drawMenu(W, H)
 	-- Show status/errors on the menu (e.g. host bind failures, disconnect messages).
 	if menuStatus and #menuStatus > 0 then
 		love.graphics.setColor(1.0, 0.45, 0.45)
-		love.graphics.printf(menuStatus, 0, H - 90, W, "center")
+		DrawSharpText(menuStatus, 0, H - 90, W, "center")
 	end
 
 	love.graphics.setColor(0.5, 0.5, 0.5)
-	love.graphics.printf("Use ↑/↓ to select, Enter to confirm", 0, H - 60, W, "center")
+	DrawSharpText("Use ↑/↓ to select, Enter to confirm", 0, H - 60, W, "center")
 end
 
 -- ─────────────────────────────────────────────
@@ -1171,7 +1277,7 @@ function drawSettings(W, H)
     -- Title
     love.graphics.setFont(getFont(32))
     love.graphics.setColor(1.0, 0.85, 0.2)
-    love.graphics.printf("Settings", 0, 40, W, "center")
+    DrawSharpText("Settings", 0, 40, W, "center")
 
     -- Grid layout: 2 columns x 4 rows
     local labelFont = getFont(14)
@@ -1201,7 +1307,7 @@ function drawSettings(W, H)
         -- Label
         love.graphics.setFont(labelFont)
         love.graphics.setColor(isSelected and {1.0, 1.0, 0.4} or {0.6, 0.6, 0.6})
-        love.graphics.printf(label, x, y, colWidth, "center")
+        DrawSharpText(label, x, y, colWidth, "center")
 
         -- Value
         love.graphics.setFont(valueFont)
@@ -1216,13 +1322,13 @@ function drawSettings(W, H)
         end
 
         local displayValue = isEditing and (value .. "_") or ("◀ " .. value .. " ▶")
-        love.graphics.printf(displayValue, x, y + 20, colWidth, "center")
+        DrawSharpText(displayValue, x, y + 20, colWidth, "center")
 
         -- Detail (smaller, below value)
         if detail then
             love.graphics.setFont(getFont(11))
             love.graphics.setColor(0.45, 0.45, 0.5)
-            love.graphics.printf(detail, x, y + 44, colWidth, "center")
+            DrawSharpText(detail, x, y + 44, colWidth, "center")
         end
     end
 
@@ -1269,7 +1375,7 @@ function drawSettings(W, H)
     local instructions = settingsEditingName
         and "Type name • Enter to save • Esc to cancel"
         or "↑/↓/←/→ navigate  •  Space change  •  Esc back"
-    love.graphics.printf(instructions, 0, H - 50, W, "center")
+    DrawSharpText(instructions, 0, H - 50, W, "center")
 end
 
 function drawConnecting(W, H)
@@ -1278,13 +1384,13 @@ function drawConnecting(W, H)
 
     love.graphics.setFont(getFont(20))
     love.graphics.setColor(1, 1, 1)
-    love.graphics.printf(menuStatus, 0, 80, W, "center")
+    DrawSharpText(menuStatus, 0, 80, W, "center")
 
     -- IP input area
     local inputY = 140
     love.graphics.setFont(getFont(16))
     love.graphics.setColor(0.6, 0.6, 0.6)
-    love.graphics.printf("Enter IP address:", 0, inputY, W, "center")
+    DrawSharpText("Enter IP address:", 0, inputY, W, "center")
 
     love.graphics.setFont(getFont(28))
     if ipHistoryIndex == 0 then
@@ -1294,7 +1400,7 @@ function drawConnecting(W, H)
     end
     local display = joinAddress
     if #display == 0 then display = "_" end
-    love.graphics.printf(display, 0, inputY + 30, W, "center")
+    DrawSharpText(display, 0, inputY + 30, W, "center")
 
     -- IP History
     local history = Config.getIPHistory()
@@ -1302,7 +1408,7 @@ function drawConnecting(W, H)
         local historyY = inputY + 90
         love.graphics.setFont(getFont(16))
         love.graphics.setColor(0.6, 0.6, 0.6)
-        love.graphics.printf("Recent connections (↑/↓ to select):", 0, historyY, W, "center")
+        DrawSharpText("Recent connections (↑/↓ to select):", 0, historyY, W, "center")
 
         love.graphics.setFont(getFont(22))
         local maxDisplay = math.min(#history, 5)  -- Show max 5 entries
@@ -1310,22 +1416,22 @@ function drawConnecting(W, H)
             local y = historyY + 30 + (i - 1) * 35
             if i == ipHistoryIndex then
                 love.graphics.setColor(1.0, 1.0, 0.4)
-                love.graphics.printf("> " .. history[i] .. " <", 0, y, W, "center")
+                DrawSharpText("> " .. history[i] .. " <", 0, y, W, "center")
             else
                 love.graphics.setColor(0.7, 0.7, 0.7)
-                love.graphics.printf(history[i], 0, y, W, "center")
+                DrawSharpText(history[i], 0, y, W, "center")
             end
         end
         if #history > maxDisplay then
             love.graphics.setFont(getFont(14))
             love.graphics.setColor(0.5, 0.5, 0.5)
-            love.graphics.printf("... and " .. (#history - maxDisplay) .. " more", 0, historyY + 30 + maxDisplay * 35, W, "center")
+            DrawSharpText("... and " .. (#history - maxDisplay) .. " more", 0, historyY + 30 + maxDisplay * 35, W, "center")
         end
     end
 
     love.graphics.setFont(getFont(14))
     love.graphics.setColor(0.5, 0.5, 0.5)
-    love.graphics.printf("Enter to connect  •  Backspace to go back", 0, H - 40, W, "center")
+    DrawSharpText("Enter to connect  •  Backspace to go back", 0, H - 40, W, "center")
 end
 
 
@@ -1955,16 +2061,17 @@ function drawGameOver(W, H)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
 	love.graphics.setFont(getFont(56))
-    love.graphics.setColor(1, 1, 0.3)
     if winner and winner > 0 then
-        love.graphics.printf("Player " .. winner .. " Wins!", 0, H / 2 - 60, W, "center")
+        love.graphics.setColor(1, 1, 0.3)
+        DrawSharpText("Player " .. winner .. " Wins!", 0, H / 2 - 60, W, "center")
     else
-        love.graphics.printf("Draw!", 0, H / 2 - 60, W, "center")
+        love.graphics.setColor(0.8, 0.8, 0.8)
+        DrawSharpText("Draw!", 0, H / 2 - 60, W, "center")
     end
 
 	love.graphics.setFont(getFont(20))
     love.graphics.setColor(1, 1, 1, 0.7)
-    love.graphics.printf("Press R to restart", 0, H / 2 + 20, W, "center")
+    DrawSharpText("Press R to restart", 0, H / 2 + 20, W, "center")
 end
 
 -- ─────────────────────────────────────────────
@@ -2243,8 +2350,8 @@ function updateDemoMode(dt)
     local localPlayer = players[1]  -- In demo mode, P1 is always local
     if localPlayer and localPlayer.life > 0 then
         local mx, my = love.mouse.getPosition()
-        local gameX = (mx - offsetX) / scaleX
-        local gameY = (my - offsetY) / scaleY
+        local gameX = (mx - offsetX) / GLOBAL_SCALE
+        local gameY = (my - offsetY) / GLOBAL_SCALE
         local W, H = GAME_WIDTH, GAME_HEIGHT
         local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
         local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
@@ -2254,4 +2361,135 @@ function updateDemoMode(dt)
 
     -- Check for game over
     checkGameOver()
+end
+
+-- ─────────────────────────────────────────────
+-- Mouse handling
+-- ─────────────────────────────────────────────
+function love.mousemoved(x, y, dx, dy, istouch)
+    -- Normalize coordinates
+    local gx, gy = windowToGame(x, y)
+    local W, H = GAME_WIDTH, GAME_HEIGHT
+
+    if gameState == "menu" then
+        -- Menu items centered, verify coordinates from drawMenu
+        local menuY = 240
+        local itemHeight = 50
+        local menuWidth = 400 -- clickable area width
+        local menuX = (W - menuWidth) / 2
+        
+        for i = 1, 4 do
+            local itemY = menuY + (i - 1) * itemHeight
+            -- Check if mouse is roughly over the text item
+            if isMouseOver(gx, gy, menuX, itemY, menuWidth, itemHeight) then
+                if menuChoice ~= i then
+                    menuChoice = i
+                    Sounds.play("menu_nav")
+                end
+            end
+        end
+
+    elseif gameState == "settings" then
+        if settingsEditingName then return end
+
+        -- Grid layout parameters from drawSettings
+        local colWidth = 320
+        local leftColX = W/2 - colWidth - 40
+        local rightColX = W/2 + 40
+        local startY = 100
+        local rowHeight = 115
+        local maxRows = 4
+        
+        -- Check left column
+        for r = 1, maxRows do
+            local cellX = leftColX
+            local cellY = startY + (r - 1) * rowHeight
+            -- The box is drawn at x-10, y-8 with size colWidth+20, rowHeight-20
+            if isMouseOver(gx, gy, cellX - 10, cellY - 8, colWidth + 20, rowHeight - 20) then
+                if settingsCol ~= 1 or settingsRow ~= r then
+                    settingsCol = 1
+                    settingsRow = r
+                    Sounds.play("menu_nav")
+                end
+            end
+        end
+        
+        -- Check right column
+        for r = 1, 3 do -- only 3 rows in right column
+            local cellX = rightColX
+            local cellY = startY + (r - 1) * rowHeight
+             if isMouseOver(gx, gy, cellX - 10, cellY - 8, colWidth + 20, rowHeight - 20) then
+                if settingsCol ~= 2 or settingsRow ~= r then
+                    settingsCol = 2
+                    settingsRow = r
+                    Sounds.play("menu_nav")
+                end
+            end
+        end
+    end
+end
+
+function love.mousepressed(x, y, button, istouch, presses)
+    if button == 1 then
+        -- Left click behaviors
+        if gameState == "menu" then
+            local gx, gy = windowToGame(x, y)
+            local W, H = GAME_WIDTH, GAME_HEIGHT
+            local menuY = 240
+            local itemHeight = 50
+            local menuWidth = 400
+            local menuX = (W - menuWidth) / 2
+            
+            local clickedItem = nil
+            for i = 1, 4 do
+                local itemY = menuY + (i - 1) * itemHeight
+                if isMouseOver(gx, gy, menuX, itemY, menuWidth, itemHeight) then
+                    clickedItem = i
+                    break
+                end
+            end
+            
+            if clickedItem and clickedItem == menuChoice then
+                handleMenuKey("return")
+            end
+
+        elseif gameState == "settings" then
+             -- Similarly for settings
+            if settingsEditingName then
+                -- Check if we clicked outside to stop editing?
+                 return
+            end
+
+            local gx, gy = windowToGame(x, y)
+            local W, H = GAME_WIDTH, GAME_HEIGHT
+            local colWidth = 320
+            local leftColX = W/2 - colWidth - 40
+            local rightColX = W/2 + 40
+            local startY = 100
+            local rowHeight = 115
+            
+            -- Check if clicked on current selection
+            local clicked = false
+            -- Left col
+            if settingsCol == 1 then
+                local r = settingsRow
+                local cellX = leftColX
+                local cellY = startY + (r - 1) * rowHeight
+                if isMouseOver(gx, gy, cellX - 10, cellY - 8, colWidth + 20, rowHeight - 20) then
+                    clicked = true
+                end
+            elseif settingsCol == 2 then
+                local r = settingsRow
+                local cellX = rightColX
+                local cellY = startY + (r - 1) * rowHeight
+                if isMouseOver(gx, gy, cellX - 10, cellY - 8, colWidth + 20, rowHeight - 20) then
+                    clicked = true
+                end
+            end
+            
+            if clicked then
+                handleSettingsKey("return")
+            end
+        end
+    end
 end

@@ -10,10 +10,20 @@ local FONT_PATH = "assets/fonts/FredokaOne-Regular.ttf"
 -- Cache HUD fonts to avoid allocating new Font objects every frame.
 local _nameFont
 local _statFont
+
+function HUD.clearFontCache()
+    _nameFont = nil
+    _statFont = nil
+end
+
 local function ensureFonts()
     if _nameFont then return end
-    _nameFont = love.graphics.newFont(FONT_PATH, 14)
-    _statFont = love.graphics.newFont(FONT_PATH, 11)
+    
+    -- Use global scale from main.lua if available, otherwise 1
+    local scale = GLOBAL_SCALE or 1
+    
+    _nameFont = love.graphics.newFont(FONT_PATH, math.floor(14 * scale))
+    _statFont = love.graphics.newFont(FONT_PATH, math.floor(11 * scale))
 end
 
 
@@ -41,14 +51,28 @@ function HUD.drawPlayerInfo(player, x, y)
 	ensureFonts()
     local def = Shapes.get(player.shapeKey)
     if not def then return end
+    
+    local scale = GLOBAL_SCALE or 1
 	local nameFont = _nameFont
 	local statFont = _statFont
+    
+    -- Helper to draw text with inverse scaling for sharpness
+    -- We are drawing inside the HUD which is top-level (not camera transformed),
+    -- but it IS scaled by GLOBAL_SCALE in main.lua's draw stack.
+    local function drawSharpText(text, tx, ty, limit, align, font)
+        love.graphics.setFont(font)
+        love.graphics.push()
+        love.graphics.translate(tx, ty)
+        love.graphics.scale(1/scale, 1/scale)
+        -- scale up the width limit
+        love.graphics.printf(text, 0, 0, limit * scale, align)
+        love.graphics.pop()
+    end
 
     -- Player name + shape
-    love.graphics.setFont(nameFont)
     love.graphics.setColor(def.color)
     local label = "P" .. player.id .. " - " .. def.name
-    love.graphics.printf(label, x, y, BAR_WIDTH, "center")
+    drawSharpText(label, x, y, BAR_WIDTH, "center", nameFont)
 
     -- ── Life bar ──
     local barY = y + 20
@@ -69,11 +93,10 @@ function HUD.drawPlayerInfo(player, x, y)
     love.graphics.setLineWidth(1)
     love.graphics.rectangle("line", x, barY, BAR_WIDTH, BAR_HEIGHT, 4, 4)
     -- Text
-    love.graphics.setFont(statFont)
     love.graphics.setColor(1, 1, 1)
-    love.graphics.printf(
+    drawSharpText(
         math.floor(player.life) .. " / " .. player.maxLife,
-        x, barY + 2, BAR_WIDTH, "center"
+        x, barY + 2, BAR_WIDTH, "center", statFont
     )
 
     -- ── Will bar ──
@@ -90,23 +113,23 @@ function HUD.drawPlayerInfo(player, x, y)
     love.graphics.rectangle("line", x, willY, BAR_WIDTH, WILL_HEIGHT, 3, 3)
     -- Will label
     love.graphics.setColor(0.8, 0.85, 1.0)
-    love.graphics.printf(
+    drawSharpText(
         "Will: " .. math.floor(player.will),
-        x, willY, BAR_WIDTH, "center"
+        x, willY, BAR_WIDTH, "center", statFont
     )
 
     -- ── Buff indicators ──
     local buffY = willY + WILL_HEIGHT + 3
     local buffX = x
-    love.graphics.setFont(statFont)
+    love.graphics.setFont(statFont) -- Fallback if not using helper for some reason, but we will use helper
     if player.armor and player.armor > 0 then
         love.graphics.setColor(0.7, 0.7, 0.75, 0.9)
-        love.graphics.printf("🛡 " .. math.floor(player.armor), buffX, buffY, BAR_WIDTH / 2, "center")
+        drawSharpText("🛡 " .. math.floor(player.armor), buffX, buffY, BAR_WIDTH / 2, "center", statFont)
         buffX = buffX + BAR_WIDTH / 2
     end
     if player.damageBoostShots and player.damageBoostShots > 0 then
         love.graphics.setColor(1.0, 0.3, 0.2, 0.9)
-        love.graphics.printf("⚔ x" .. player.damageBoostShots, buffX, buffY, BAR_WIDTH / 2, "center")
+        drawSharpText("⚔ x" .. player.damageBoostShots, buffX, buffY, BAR_WIDTH / 2, "center", statFont)
     end
 end
 
