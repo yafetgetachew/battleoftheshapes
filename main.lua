@@ -298,6 +298,11 @@ function love.load()
         addHitPause(0.06)  -- Extra 60ms on kill
     end
 
+    -- Set up player damage callback for network damage numbers
+    Player.onDamageReceived = function(x, y, damage)
+        spawnDamageNumber(x, y, damage)
+    end
+
     -- Set up lightning hit callbacks for juice effects
     Lightning.onHit = function(x, y, damage)
         spawnDamageNumber(x, y, damage)
@@ -1723,6 +1728,11 @@ function applyGameState(data)
     else
         -- Local player: only apply authoritative life/buffs from host
         if data.life ~= nil then
+            -- Show damage number if life decreased
+            if data.life < players[pid].life and players[pid].life > 0 then
+                local dmg = players[pid].life - data.life
+                spawnDamageNumber(players[pid].x, players[pid].y, dmg)
+            end
             players[pid].life = data.life
         end
         if data.armor ~= nil then
@@ -1858,6 +1868,7 @@ local function createBotState(playerId)
         playerId = playerId,
         jumpTimer = math.random() * 2 + 0.5,      -- time until next jump
         castTimer = math.random() * 3 + 1,        -- time until next cast
+        specialTimer = math.random() * 6 + 3,     -- time until next special ability
         moveTimer = math.random() * 1.5 + 0.5,    -- time until direction change
         moveDir = math.random() < 0.5 and -1 or 1 -- current move direction
     }
@@ -1879,6 +1890,29 @@ local function updateBotAI(bot, player, dt, allPlayers)
     if bot.castTimer <= 0 then
         player:castAbilityAtNearest(allPlayers)
         bot.castTimer = math.random() * 2 + 0.5  -- 0.5-2.5 seconds between casts
+    end
+
+    -- Random special ability usage
+    bot.specialTimer = bot.specialTimer - dt
+    if bot.specialTimer <= 0 then
+        -- Find nearest enemy for targeting
+        local nearest = nil
+        local nearestDist = math.huge
+        for _, other in ipairs(allPlayers) do
+            if other.id ~= player.id and other.life and other.life > 0 then
+                local dist = math.abs(other.x - player.x)
+                if dist < nearestDist then
+                    nearestDist = dist
+                    nearest = other
+                end
+            end
+        end
+        if nearest and player.shapeKey then
+            local dir = nearest.x > player.x and 1 or -1
+            player.facingRight = (dir == 1)
+            Abilities.cast(player, player.shapeKey, dir > 0, nearest.x, nearest.y)
+        end
+        bot.specialTimer = math.random() * 8 + 4  -- 4-12 seconds between specials
     end
 
     -- Random movement direction changes

@@ -9,6 +9,10 @@ local Config      = require("config")
 local Player = {}
 Player.__index = Player
 
+-- Callback for damage visualization (set by main.lua)
+-- function(x, y, damage) called when player receives damage via network sync
+Player.onDamageReceived = nil
+
 -- Shape → ability type mapping (all shapes use fireball)
 Player.ABILITY_MAP = {
     triangle  = "fireball",
@@ -398,8 +402,13 @@ function Player:applyNetState(state)
     if state.life ~= nil then
         -- Detect damage taken and trigger visual effects
         if state.life < self.life and self.life > 0 then
+            local dmgTaken = self.life - state.life
             self.hitFlash = 0.25  -- flash when damaged
             self:applySquash(0.7, 1.25, 0.15)  -- squash effect
+            -- Fire damage callback for damage numbers
+            if Player.onDamageReceived then
+                Player.onDamageReceived(self.x, self.y, dmgTaken)
+            end
         end
         self.life = state.life
     end

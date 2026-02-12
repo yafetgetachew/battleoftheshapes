@@ -342,18 +342,15 @@ function Projectiles._drawFireball(p)
 end
 
 function Projectiles._hitTest(proj, player)
-    -- Circle vs AABB
-    local cx, cy, r = proj.x, proj.y, proj.radius
-    local px = player.x - player.shapeWidth / 2
-    local py = player.y - player.shapeHeight / 2
-    local pw = player.shapeWidth
-    local ph = player.shapeHeight
-
-    local closestX = math.max(px, math.min(cx, px + pw))
-    local closestY = math.max(py, math.min(cy, py + ph))
-    local dx = cx - closestX
-    local dy = cy - closestY
-    return (dx * dx + dy * dy) <= (r * r)
+    -- Use a generous circle collision for better "feel"
+    -- Treat player as a circle with radius = half of their largest dimension
+    -- This fixes issues where projectiles seem to pass through or just miss shapes like the Rectangle
+    local pRadius = math.max(player.shapeWidth, player.shapeHeight) / 2
+    local combinedRadius = proj.radius + pRadius
+    
+    local dx = proj.x - player.x
+    local dy = proj.y - player.y
+    return (dx * dx + dy * dy) < (combinedRadius * combinedRadius)
 end
 
 function Projectiles._isOffScreen(p)

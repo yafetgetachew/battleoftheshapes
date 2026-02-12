@@ -5,6 +5,7 @@
 local Physics = require("physics")
 local Sounds  = require("sounds")
 local Network = require("network")
+local Map     = require("map")
 
 local Abilities = {}
 
@@ -24,6 +25,11 @@ Abilities.DAMAGE = {
     circle    = 30,  -- Rolling boulder
 }
 
+-- Physics constants for ability projectiles
+local ABILITY_GRAVITY = 600       -- gravity for ability projectiles (lighter than player gravity)
+local ABILITY_BOUNCE = 0.5        -- bounce coefficient (energy retained)
+local ABILITY_WALL_BOUNCE = 0.6   -- wall bounce coefficient
+
 -- Knockback constant
 local ABILITY_KNOCKBACK = 200
 
@@ -36,6 +42,76 @@ local activeSpikes = {}       -- Triangle spikes
 local activeBlocks = {}       -- Rectangle falling blocks
 local activeBoulders = {}     -- Circle rolling boulders
 local activeLasers = {}       -- Square laser beams
+local activeSparks = {}       -- Laser hit sparks
+local activeDebris = {}       -- Block debris after tipping
+
+-- ─────────────────────────────────────────────
+-- Shared physics helper for ability projectiles
+-- ─────────────────────────────────────────────
+local function resolveAbilityGround(obj, radius)
+    radius = radius or 0
+    local footY = obj.y + radius
+    if footY >= Physics.GROUND_Y then
+        obj.y = Physics.GROUND_Y - radius
+        if obj.vy > 0 then
+            obj.vy = -obj.vy * ABILITY_BOUNCE
+            obj.vx = obj.vx * 0.85  -- friction on bounce
+            if math.abs(obj.vy) < 30 then
+                obj.vy = 0
+                obj.onGround = true
+            end
+        end
+    end
+end
+
+local function resolveAbilityWalls(obj, radius)
+    radius = radius or 0
+    if obj.x - radius < Physics.WALL_LEFT then
+        obj.x = Physics.WALL_LEFT + radius
+        obj.vx = -obj.vx * ABILITY_WALL_BOUNCE
+    elseif obj.x + radius > Physics.WALL_RIGHT then
+        obj.x = Physics.WALL_RIGHT - radius
+        obj.vx = -obj.vx * ABILITY_WALL_BOUNCE
+    end
+end
+
+local function resolveAbilityPlatforms(obj, radius, dt)
+    radius = radius or 0
+    -- Only check if falling
+    if obj.vy <= 0 then return end
+    local footY = obj.y + radius
+    local prevFootY = footY - obj.vy * dt
+    for _, plat in ipairs(Map.platforms) do
+        local platTop = plat.y - plat.h / 2
+        local platLeft = plat.x - plat.w / 2
+        local platRight = plat.x + plat.w / 2
+        if obj.x > platLeft and obj.x < platRight then
+            if prevFootY <= platTop and footY >= platTop then
+                obj.y = platTop - radius
+                if obj.vy > 0 then
+                    obj.vy = -obj.vy * ABILITY_BOUNCE
+                    obj.vx = obj.vx * 0.85
+                    if math.abs(obj.vy) < 30 then
+                        obj.vy = 0
+                        obj.onGround = true
+                    end
+                end
+                return
+            end
+        end
+    end
+end
+
+local function applyAbilityPhysics(obj, dt, radius, useGravity)
+    if useGravity ~= false then
+        obj.vy = (obj.vy or 0) + ABILITY_GRAVITY * dt
+    end
+    obj.x = obj.x + (obj.vx or 0) * dt
+    obj.y = obj.y + (obj.vy or 0) * dt
+    resolveAbilityGround(obj, radius)
+    resolveAbilityPlatforms(obj, radius, dt)
+    resolveAbilityWalls(obj, radius)
+end
 
 -- ─────────────────────────────────────────────
 -- Spawning functions
@@ -86,16 +162,17 @@ function Abilities.spawnSpikes(caster, facingRight)
     local baseX = caster.x + dir * (caster.shapeWidth / 2 + 10)
     local baseY = caster.y
     
-    -- Spawn three spikes: center, above, below
+    -- Spawn three spikes: center, above, below (with slight upward/downward spread)
     local offsets = {0, -25, 25}
-    for _, yOffset in ipairs(offsets) do
+    local vyOffsets = {-30, -80, 20}  -- center arcs slightly, top arcs up, bottom arcs down
+    for idx, yOffset in ipairs(offsets) do
         local spike = {
             type = "spike",
             owner = caster.id,
             x = baseX,
             y = baseY + yOffset,
             vx = 700 * dir,  -- Fast projectile
-            vy = 0,
+            vy = vyOffsets[idx],  -- Slight vertical arc
             damage = Abilities.DAMAGE.triangle,
             radius = 10,
             age = 0,
@@ -161,6 +238,8 @@ function Abilities.spawnBoulder(caster, facingRight)
         vy = 0,
         damage = Abilities.DAMAGE.circle,
         radius = 35,                -- Larger than player
+        onGround = true,            -- starts on ground
+        bounceCount = 0,            -- track bounces for wall bounce
         age = 0,
         rotation = 0,               -- For visual rolling
     }
@@ -293,8 +372,8 @@ function Abilities.update(dt, players)
                     local projY = ly1 + t * (ly2 - ly1)
                     local distSq = (px - projX)^2 + (py - projY)^2
                     
-                    -- Player radius estimate (average width/height)
-                    local pRadius = (player.shapeWidth + player.shapeHeight) / 4
+                    -- Player radius estimate (use max dimension for generous hit detection)
+                    local pRadius = math.max(player.shapeWidth, player.shapeHeight) / 2
                     local laserRadius = laser.height / 2
 
                     if distSq < (pRadius + laserRadius)^2 then
@@ -304,6 +383,22 @@ function Abilities.update(dt, players)
                             local hitDir = math.cos(laser.angle) > 0 and 1 or -1
                             applyDamage(player, laser.damagePerHit, hitDir, isAuthority)
                             laser.hitCooldown[player.id] = 0.033  -- ~30 damage per second
+
+                            -- Spawn flying sparks at hit point
+                            for _ = 1, math.random(3, 5) do
+                                table.insert(activeSparks, {
+                                    x = projX,
+                                    y = projY,
+                                    vx = (math.random() - 0.5) * 300 + hitDir * 100,
+                                    vy = -math.random() * 200 - 50,
+                                    age = 0,
+                                    maxAge = 0.3 + math.random() * 0.3,
+                                    r = 1.0,
+                                    g = 0.5 + math.random() * 0.4,
+                                    b = 0.1 + math.random() * 0.2,
+                                    size = 2 + math.random() * 3,
+                                })
+                            end
                         end
                     end
                 end
@@ -311,18 +406,15 @@ function Abilities.update(dt, players)
         end
     end
 
-    -- Update spikes
+    -- Update spikes (with gravity and platform collision)
     for i = #activeSpikes, 1, -1 do
         local spike = activeSpikes[i]
-        spike.x = spike.x + spike.vx * dt
         spike.age = spike.age + dt
 
-        local hit = false
+        -- Apply physics: gravity, ground bounce, platform collision, wall bounce
+        applyAbilityPhysics(spike, dt, spike.radius, true)
 
-        -- Check wall collision
-        if spike.x < Physics.WALL_LEFT or spike.x > Physics.WALL_RIGHT then
-            hit = true
-        end
+        local hit = false
 
         -- Check player collision
         if not hit then
@@ -331,7 +423,8 @@ function Abilities.update(dt, players)
                     local dx = spike.x - player.x
                     local dy = spike.y - player.y
                     local dist = math.sqrt(dx * dx + dy * dy)
-                    if dist < spike.radius + player.shapeWidth / 2 then
+                    local playerRadius = math.max(player.shapeWidth, player.shapeHeight) / 2
+                    if dist < spike.radius + playerRadius then
                         local hitDir = spike.vx > 0 and 1 or -1
                         applyDamage(player, spike.damage, hitDir, isAuthority)
                         Sounds.play("spike_hit")
@@ -368,6 +461,23 @@ function Abilities.update(dt, players)
         -- Check if block has tipped over (rotation past ~80 degrees = 1.4 radians)
         if block.rotation and math.abs(block.rotation) >= 1.4 then
             Sounds.play("block_land")
+            -- Spawn debris chunks that bounce around
+            local pivotY = block.groundY or Physics.GROUND_Y
+            local pivotX = block.x - block.dir * block.width / 2
+            local tipX = pivotX + math.sin(block.rotation) * block.height
+            local tipY = pivotY + (-math.cos(block.rotation) * block.height)
+            for d = 1, 3 do
+                table.insert(activeDebris, {
+                    x = pivotX + (tipX - pivotX) * (d / 3),
+                    y = tipY + (pivotY - tipY) * (d / 3) - 10,
+                    vx = (math.random() - 0.5) * 300 + block.vx * 0.3,
+                    vy = -math.random() * 200 - 100,
+                    size = math.random(8, 16),
+                    age = 0,
+                    rotation = math.random() * math.pi * 2,
+                    rotSpeed = (math.random() - 0.5) * 10,
+                })
+            end
             hit = true
         end
 
@@ -386,13 +496,13 @@ function Abilities.update(dt, players)
                     local blockCenterX, blockCenterY
                     if block.rotation then
                         -- Block pivots from base, calculate swept position
-                        local pivotY = block.groundY or Physics.GROUND_Y
-                        local pivotX = block.x - block.dir * block.width / 2
+                        local pivotY2 = block.groundY or Physics.GROUND_Y
+                        local pivotX2 = block.x - block.dir * block.width / 2
                         -- Tip of block position based on rotation
                         local tipOffsetX = math.sin(block.rotation) * block.height
                         local tipOffsetY = -math.cos(block.rotation) * block.height
-                        blockCenterX = pivotX + tipOffsetX / 2
-                        blockCenterY = pivotY + tipOffsetY / 2
+                        blockCenterX = pivotX2 + tipOffsetX / 2
+                        blockCenterY = pivotY2 + tipOffsetY / 2
                     else
                         blockCenterX = block.x
                         blockCenterY = block.y
@@ -420,21 +530,27 @@ function Abilities.update(dt, players)
         end
     end
 
-    -- Update rolling boulders
+    -- Update debris (bouncing block chunks)
+    for i = #activeDebris, 1, -1 do
+        local d = activeDebris[i]
+        d.age = d.age + dt
+        d.rotation = d.rotation + d.rotSpeed * dt
+        applyAbilityPhysics(d, dt, d.size / 2, true)
+        if d.age > 2.5 then
+            table.remove(activeDebris, i)
+        end
+    end
+
+    -- Update rolling boulders (with gravity, platform/ground/wall bounce)
     for i = #activeBoulders, 1, -1 do
         local boulder = activeBoulders[i]
-        boulder.x = boulder.x + boulder.vx * dt
-        boulder.rotation = boulder.rotation + (boulder.vx / boulder.radius) * dt
         boulder.age = boulder.age + dt
 
-        local hit = false
+        -- Apply physics: gravity, ground/platform bounce, wall bounce
+        applyAbilityPhysics(boulder, dt, boulder.radius, true)
+        boulder.rotation = boulder.rotation + (boulder.vx / boulder.radius) * dt
 
-        -- Check wall collision
-        if boulder.x - boulder.radius < Physics.WALL_LEFT or
-           boulder.x + boulder.radius > Physics.WALL_RIGHT then
-            Sounds.play("boulder_hit")
-            hit = true
-        end
+        local hit = false
 
         -- Check player collision
         if not hit then
@@ -443,7 +559,8 @@ function Abilities.update(dt, players)
                     local dx = boulder.x - player.x
                     local dy = boulder.y - player.y
                     local dist = math.sqrt(dx * dx + dy * dy)
-                    if dist < boulder.radius + player.shapeWidth / 2 then
+                    local playerRadius = math.max(player.shapeWidth, player.shapeHeight) / 2
+                    if dist < boulder.radius + playerRadius then
                         local hitDir = boulder.vx > 0 and 1 or -1
                         applyDamage(player, boulder.damage, hitDir, isAuthority)
                         Sounds.play("boulder_hit")
@@ -454,8 +571,22 @@ function Abilities.update(dt, players)
             end
         end
 
-        if hit or boulder.age > 5 then
+        -- Remove if speed is too low (stopped bouncing) or too old
+        local speed = math.abs(boulder.vx) + math.abs(boulder.vy)
+        if hit or boulder.age > 5 or (boulder.age > 2 and speed < 20) then
             table.remove(activeBoulders, i)
+        end
+    end
+
+    -- Update laser sparks
+    for i = #activeSparks, 1, -1 do
+        local spark = activeSparks[i]
+        spark.age = spark.age + dt
+        spark.x = spark.x + spark.vx * dt
+        spark.y = spark.y + spark.vy * dt
+        spark.vy = spark.vy + 400 * dt  -- gravity on sparks
+        if spark.age >= spark.maxAge then
+            table.remove(activeSparks, i)
         end
     end
 end
@@ -591,6 +722,44 @@ function Abilities.draw()
         love.graphics.setLineWidth(2)
         love.graphics.circle("line", boulder.x, boulder.y, boulder.radius)
     end
+
+    -- Draw block debris (bouncing chunks)
+    for _, d in ipairs(activeDebris) do
+        local alpha = math.max(0, 1 - d.age / 2.5)
+        love.graphics.push()
+        love.graphics.translate(d.x, d.y)
+        love.graphics.rotate(d.rotation)
+        -- Shadow
+        love.graphics.setColor(0, 0, 0, alpha * 0.2)
+        love.graphics.rectangle("fill", -d.size/2 + 2, -d.size/2 + 2, d.size, d.size)
+        -- Chunk
+        love.graphics.setColor(0.6, 0.4, 0.2, alpha)
+        love.graphics.rectangle("fill", -d.size/2, -d.size/2, d.size, d.size)
+        -- Outline
+        love.graphics.setColor(0.8, 0.6, 0.3, alpha * 0.8)
+        love.graphics.setLineWidth(1)
+        love.graphics.rectangle("line", -d.size/2, -d.size/2, d.size, d.size)
+        love.graphics.pop()
+    end
+
+    -- Draw laser sparks (flying glowing particles)
+    for _, spark in ipairs(activeSparks) do
+        local progress = spark.age / spark.maxAge
+        local alpha = 1 - progress * progress  -- fade out
+        local size = spark.size * (1 - progress * 0.5)  -- shrink slightly
+
+        -- Glow
+        love.graphics.setColor(spark.r, spark.g, spark.b, alpha * 0.4)
+        love.graphics.circle("fill", spark.x, spark.y, size * 2)
+
+        -- Core
+        love.graphics.setColor(spark.r, spark.g, spark.b, alpha)
+        love.graphics.circle("fill", spark.x, spark.y, size)
+
+        -- Bright center
+        love.graphics.setColor(1, 1, 0.9, alpha * 0.8)
+        love.graphics.circle("fill", spark.x, spark.y, size * 0.4)
+    end
 end
 
 -- Clear all active abilities
@@ -599,11 +768,13 @@ function Abilities.clear()
     activeSpikes = {}
     activeBlocks = {}
     activeBoulders = {}
+    activeSparks = {}
+    activeDebris = {}
 end
 
 -- Check if any abilities are active (for network sync)
 function Abilities.hasActive()
-    return #activeLasers > 0 or #activeSpikes > 0 or #activeBlocks > 0 or #activeBoulders > 0
+    return #activeLasers > 0 or #activeSpikes > 0 or #activeBlocks > 0 or #activeBoulders > 0 or #activeSparks > 0 or #activeDebris > 0
 end
 
 return Abilities
