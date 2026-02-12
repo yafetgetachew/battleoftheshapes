@@ -12,9 +12,15 @@ Player.__index = Player
 -- Font cache for name rendering
 local FONT_PATH = "assets/fonts/FredokaOne-Regular.ttf"
 local _nameFont = nil
+
+function Player.clearFontCache()
+    _nameFont = nil
+end
+
 local function getNameFont()
     if not _nameFont then
-        _nameFont = love.graphics.newFont(FONT_PATH, 14)
+        local scale = GLOBAL_SCALE or 1
+        _nameFont = love.graphics.newFont(FONT_PATH, math.floor(14 * scale))
     end
     return _nameFont
 end
@@ -561,11 +567,24 @@ function Player:draw(isGameOver)
     -- Draw player name above the shape
     if self.name and #self.name > 0 then
         local nameFont = getNameFont()
-        love.graphics.setFont(nameFont)
+        local scale = GLOBAL_SCALE or 1
         local nameY = self.y - self.shapeHeight / 2 - 20
+        
+        love.graphics.push()
+        -- Move to the center point where text should be
+        love.graphics.translate(self.x, nameY)
+        -- Inverse scale for sharp text
+        love.graphics.scale(1/scale, 1/scale)
+        
+        love.graphics.setFont(nameFont)
+        
+        -- Text wrapper width also needs scaling
+        local width = 200 * scale
+        local offsetX = 100 * scale
+        
         -- Background shadow for readability
         love.graphics.setColor(0, 0, 0, 0.5)
-        love.graphics.printf(self.name, self.x - 100 + 1, nameY + 1, 200, "center")
+        love.graphics.printf(self.name, -offsetX + 1, 1, width, "center")
         -- Name text (white with slight tint based on player ID)
         local r, g, b = 1, 1, 1
         if self.id == 1 then r, g, b = 1, 0.9, 0.8
@@ -573,7 +592,9 @@ function Player:draw(isGameOver)
         elseif self.id == 3 then r, g, b = 0.9, 1, 0.8
         end
         love.graphics.setColor(r, g, b, 0.9)
-        love.graphics.printf(self.name, self.x - 100, nameY, 200, "center")
+        love.graphics.printf(self.name, -offsetX, 0, width, "center")
+        
+        love.graphics.pop()
     end
 
     -- Draw a small directional indicator (arrow under the shape)
