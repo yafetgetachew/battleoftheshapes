@@ -7,6 +7,7 @@ function love.conf(t)
     t.window.fullscreentype = "desktop"
     t.window.resizable = true
     t.window.vsync = 1
+    t.window.highdpi = true
     t.modules.audio = true
     t.modules.event = true
     t.modules.graphics = true
