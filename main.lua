@@ -91,7 +91,6 @@ end
 local FONT_PATH = "assets/fonts/FredokaOne-Regular.ttf"
 
 -- Font cache: avoid allocating new Font objects every frame.
--- Font cache: avoid allocating new Font objects every frame.
 local _fontCache = {}
 local function getFont(size)
     -- Adjust size based on global scale for crisp text
@@ -277,7 +276,7 @@ local function updateDamageNumbers(dt)
     end
 end
 
--- Draw damage numbers (call in world space)
+-- Draw damage numbers (call in world space, inside camera transform)
 local function drawDamageNumbers()
     for _, dn in ipairs(damageNumbers) do
         local progress = dn.age / dn.maxAge
@@ -294,64 +293,26 @@ local function drawDamageNumbers()
 
         local baseSize = 18 * scale
         local font = getFont(baseSize)
-        
-        love.graphics.push()
-        -- Inverse scale for sharp text
-        love.graphics.translate(dn.x, dn.y)
-        love.graphics.scale(1/GLOBAL_SCALE, 1/GLOBAL_SCALE)
-        
-        love.graphics.setColor(0, 0, 0, alpha * 0.5)
-        love.graphics.setFont(font)
-        -- Note: coordinates are local to the translate now, so we draw relative to 0,0 matched to window pixels
-        -- But wait, dn.x/y are in game coordinates. 
-        -- When we draw in world space, the transform is:
-        -- Translate(offsetX, offsetY) -> Scale(GLOBAL_SCALE) -> Translate(Camera...) -> Draw
-        -- If we want sharp text in world space, we need the font to be size * GLOBAL_SCALE * CameraZoom?
-        -- Actually, for damage numbers, simpler approach:
-        -- They are drawn inside the camera transform.
-        -- So the net scale at drawing time is GLOBAL_SCALE * cameraZoom.
-        -- We should ideally generate fonts based on that, but camera zoom changes dynamically.
-        -- For now, let's just use GLOBAL_SCALE and ignore zoom for font generation (it's close to 1.0 usually).
-        
-        -- To draw sharp text:
-        -- 1. Font size = DesiredSize * TotalScale
-        -- 2. Draw Scale = 1 / TotalScale
-        
-        -- However, we are inside a complex transform stack.
-        -- Let's just use the global scale for font quality.
-        -- We won't apply inverse scale in world space because that would fight the camera zoom.
-        -- Instead, we simply rely on the fact that we created a large font.
-        -- Wait, if we use a large font (size * scale) and draw it normally, it will be huge.
-        -- We MUST scale it down by (1/scale).
-        
-        love.graphics.scale(1/GLOBAL_SCALE, 1/GLOBAL_SCALE) -- Only undo the global scale (monitor DPI/window size)
-        -- We do NOT undo camera zoom.
-        
-        -- Text is drawn at 0,0 relative to push/translate.
-        -- Original code: printf at (dn.x - 50, dn.y). 
-        -- Since we translated to dn.x, dn.y, we draw at (-50 * GLOBAL_SCALE, 0).
-        -- Wait, if we scale down, we need to draw at larger coordinates? 
-        -- No.
-        -- Transform:
-        -- 1. Translate(dn.x, dn.y) (Game coords)
-        -- 2. Scale(1/GLOBAL_SCALE) -> This shrinks the following drawing command.
-        -- If we draw text at (0,0), it will be tiny.
-        -- BUT, we are using a HUGE font (Size * GLOBAL_SCALE).
-        -- So Huge Font * Tiny Scale = Normal Size on Screen (but high res).
-        
-        -- The offset needs to be scaled too?
-        -- logic: 
-        -- original: printf("text", x - 50, y, 100, "center")
-        -- new: translate(x,y), scale(1/S), printf("text", -50 * S, 0, 100 * S, "center")
-        
+
+        -- Font is created at baseSize * GLOBAL_SCALE (via getFont).
+        -- We inverse-scale by 1/GLOBAL_SCALE so: large font * small scale = crisp text at intended size.
         local offset = 50 * GLOBAL_SCALE
         local width = 100 * GLOBAL_SCALE
-        
+
+        love.graphics.push()
+        love.graphics.translate(dn.x, dn.y)
+        love.graphics.scale(1/GLOBAL_SCALE, 1/GLOBAL_SCALE)
+
+        love.graphics.setFont(font)
+
+        -- Shadow
+        love.graphics.setColor(0, 0, 0, alpha * 0.5)
         love.graphics.printf(tostring(dn.value), -offset + 1, 1, width, "center")
 
+        -- Text
         love.graphics.setColor(r, g, b, alpha)
         love.graphics.printf(tostring(dn.value), -offset, 0, width, "center")
-        
+
         love.graphics.pop()
     end
 end
@@ -677,7 +638,6 @@ function love.draw()
     love.graphics.push()
 
     -- Get frequency-based screen shake offset
-    -- Get frequency-based screen shake offset
     local shakeX, shakeY = getScreenShakeOffset()
 
     love.graphics.translate(offsetX + shakeX, offsetY + shakeY)
@@ -940,9 +900,6 @@ end
 -- ─────────────────────────────────────────────
 function startCountdown()
     local choices = {selection:getChoices()}
-    for i = 1, maxPlayers do
-        players[i]:setShape(choices[i])
-    end
     Projectiles.clear()
     Abilities.clear()
 
@@ -954,6 +911,18 @@ function startCountdown()
         elseif demoMode then
             -- In demo mode, all created players are active
             table.insert(activePlayers, i)
+        end
+    end
+
+    -- Only set shapes for active players; ensure inactive players are dead
+    for i = 1, maxPlayers do
+        if selection and selection.connected[i] then
+            players[i]:setShape(choices[i])
+        elseif demoMode then
+            players[i]:setShape(choices[i])
+        else
+            players[i].life = 0
+            players[i].shapeKey = choices[i]  -- still track for display
         end
     end
 
@@ -1700,9 +1669,6 @@ function processNetworkMessages()
             -- Client received countdown start from host
             local data = msg.data
             if data then
-                for i = 1, maxPlayers do
-                    players[i]:setShape(data["s" .. i])
-                end
                 Projectiles.clear()
                 Abilities.clear()
 
@@ -1723,6 +1689,22 @@ function processNetworkMessages()
                         if selection and selection.connected[i] then
                             table.insert(activePlayers, i)
                         end
+                    end
+                end
+
+                -- Build lookup for active players
+                local isActive = {}
+                for _, pid in ipairs(activePlayers) do
+                    isActive[pid] = true
+                end
+
+                -- Only set shapes for active players; ensure inactive players are dead
+                for i = 1, maxPlayers do
+                    if isActive[i] then
+                        players[i]:setShape(data["s" .. i])
+                    else
+                        players[i].life = 0
+                        players[i].shapeKey = data["s" .. i]
                     end
                 end
 

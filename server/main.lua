@@ -318,7 +318,11 @@ processNetworkMessages = function()
         elseif msg.type == "player_cast" then
             local data = msg.data
             if data and data.pid and players[data.pid] then
-                players[data.pid]:castAbilityAtNearest(players)
+                if data.tx and data.ty then
+                    players[data.pid]:castAbilityAt(data.tx, data.ty)
+                else
+                    players[data.pid]:castAbilityAtNearest(players)
+                end
                 Network.relay(data.pid, "player_cast", data, true)
             end
 
@@ -326,7 +330,7 @@ processNetworkMessages = function()
             local data = msg.data
             if data and data.pid and players[data.pid] then
                 local p = players[data.pid]
-                Abilities.cast(p, p.shapeKey, p.facingRight)
+                Abilities.cast(p, p.shapeKey, p.facingRight, data.tx, data.ty)
                 Network.relay(data.pid, "player_special", data, true)
             end
 
@@ -415,9 +419,6 @@ end
 -- ─────────────────────────────────────────────
 startCountdown = function()
     local choices = {selection:getChoices()}
-    for i = 1, maxPlayers do
-        players[i]:setShape(choices[i])
-    end
     Projectiles.clear()
     Abilities.clear()
     Dropbox.reset()
@@ -427,6 +428,16 @@ startCountdown = function()
     for i = 1, maxPlayers do
         if selection and selection.connected[i] then
             table.insert(activePlayers, i)
+        end
+    end
+
+    -- Only set shapes for active players; ensure inactive players are dead
+    for i = 1, maxPlayers do
+        if selection and selection.connected[i] then
+            players[i]:setShape(choices[i])
+        else
+            players[i].life = 0
+            players[i].shapeKey = choices[i]  -- still track for display
         end
     end
 
