@@ -21,6 +21,8 @@ Choose your scheme in **Settings**:
 | Move | `A` / `D` | `←` / `→` |
 | Jump | `Space` | `Enter` |
 | Cast Fireball | `W` | `↑` |
+| Special Ability | `E` | `↓` |
+| Dash | Double-tap `A`/`D` | Double-tap `←`/`→` |
 
 `Escape` to quit • `R` to restart after game over
 
@@ -45,16 +47,18 @@ It’ll sit there quietly, waiting for connections… like a very patient polygo
 
 ## ⚔️ The Shapes
 
-| Shape | Life | Will | Speed | Vibe |
-|-------|------|------|-------|------|
-| 🟦 Square | 120 | 100 | 250 | Reliable, boring, deadly |
-| 🔺 Triangle | 90 | 130 | 300 | Fast, pointy, menacing |
-| 🔴 Circle | 110 | 110 | 270 | Smooth, diplomatic (lies) |
-| 🟨 Rectangle | 140 | 80 | 220 | THICC and unstoppable |
+| Shape | Life | Will | Speed | Special Ability |
+|-------|------|------|-------|-----------------|
+| 🟦 Square | 120 | 80 | 325 | **Laser Beam** — Sustained damage ray |
+| 🔺 Triangle | 90 | 110 | 390 | **Triple Spikes** — Three fast projectiles |
+| 🔴 Circle | 100 | 100 | 350 | **Rolling Boulder** — Ground-rolling rock |
+| 🟨 Rectangle | 140 | 60 | 275 | **Falling Block** — Tipping pillar attack |
 
 ## 💥 Combat
 
-- **Fireballs**: Cost 10 Will, deal 15 damage, auto-aim at nearest enemy
+- **Fireballs** (`W`/`↑`): Cost 10 Will, deal 15 damage, auto-aim at nearest enemy
+- **Special Abilities** (`E`/`↓`): Unique per shape, costs 30-50 Will
+- **Dash** (double-tap): Quick dodge, deals damage on collision
 - **Collision**: Lower player takes damage. High ground wins. Obi-Wan was right.
 - **Lightning**: Random strikes every 4-10 seconds. Watch for the warning!
 - **Victory**: Last shape standing. No mercy.
@@ -70,12 +74,42 @@ It’ll sit there quietly, waiting for connections… like a very patient polygo
 
 ## 🎨 Features
 
-- Parallax moonlit background with drifting clouds
-- Procedural sound effects and music
-- Death explosions with particle effects
-- Low health heartbeat warning
-- Landing dust and idle breathing animations
-- Victory fanfare
+- **Parallax moonlit background** with drifting clouds and stars
+- **Dynamic camera** with velocity lead and impact zoom
+- **Screen shake & hit pause** for impactful combat
+- **Damage numbers** floating up on hits
+- **Death explosions** with particle effects
+- **Low health heartbeat** warning
+- **Landing dust** and idle breathing animations
+- **Victory fanfare** with loser fade effects
+
+## 📁 Project Structure
+
+```
+battleoftheshapes/
+├── main.lua          # Game entry point & main loop
+├── conf.lua          # LÖVE2D configuration
+├── player.lua        # Player class & input handling
+├── physics.lua       # Gravity, collision, ground resolution
+├── projectiles.lua   # Fireballs & particle effects
+├── abilities.lua     # Shape-specific special abilities
+├── shapes.lua        # Shape definitions & stats
+├── sounds.lua        # Procedural & file-based audio
+├── background.lua    # Parallax background system
+├── lightning.lua     # Lightning strike hazard
+├── dropbox.lua       # Power-up drop system
+├── hud.lua           # Health/will bars UI
+├── selection.lua     # Character selection screen
+├── network.lua       # LAN multiplayer networking
+├── config.lua        # Settings & configuration
+├── assets/
+│   ├── fonts/        # Game fonts
+│   └── sounds/       # Music & sound effects
+├── server/           # Dedicated server (source-only)
+│   ├── main.lua
+│   └── conf.lua
+└── builds/           # Build outputs (gitignored)
+```
 
 ---
 

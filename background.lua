@@ -215,17 +215,25 @@ local function drawForegroundElement(elem, offsetX)
     love.graphics.setColor(COLORS.foreground)
 
     if elem.type == 1 then
-        -- Tree branch reaching in from side
+        -- Tree with trunk and branches reaching in from side
         local dir = elem.side == "left" and 1 or -1
-        love.graphics.setLineWidth(4)
-        -- Main branch
-        love.graphics.line(x, y - 200, x + dir * 80, y - 280)
-        love.graphics.line(x + dir * 80, y - 280, x + dir * 140, y - 260)
+        -- Trunk (grounded)
+        love.graphics.polygon("fill",
+            x, y,                       -- Ground left
+            x + dir * 20, y,            -- Ground right
+            x + dir * 18, y - 200,      -- Top right
+            x + dir * 5, y - 200        -- Top left
+        )
+        love.graphics.setLineWidth(5)
+        -- Main branch reaching inward
+        love.graphics.line(x + dir * 12, y - 180, x + dir * 80, y - 250)
+        love.graphics.line(x + dir * 80, y - 250, x + dir * 140, y - 230)
         -- Sub-branches
+        love.graphics.setLineWidth(3)
+        love.graphics.line(x + dir * 50, y - 220, x + dir * 90, y - 290)
+        love.graphics.line(x + dir * 100, y - 240, x + dir * 130, y - 270)
         love.graphics.setLineWidth(2)
-        love.graphics.line(x + dir * 60, y - 270, x + dir * 90, y - 320)
-        love.graphics.line(x + dir * 100, y - 265, x + dir * 130, y - 300)
-        love.graphics.line(x + dir * 120, y - 262, x + dir * 160, y - 240)
+        love.graphics.line(x + dir * 120, y - 235, x + dir * 160, y - 210)
     elseif elem.type == 2 then
         -- Dead tree silhouette
         local dir = elem.side == "left" and 1 or -1
@@ -334,32 +342,32 @@ function Background.update(dt)
         if mote.y > GROUND_Y - 50 then mote.y = 50 end
     end
 
-    -- Update falling stars
+    -- Update falling stars (comets)
     for i = #fallingStars, 1, -1 do
         local star = fallingStars[i]
         star.x = star.x + star.vx * dt
         star.y = star.y + star.vy * dt
         star.age = star.age + dt
         star.trail = star.trail or {}
-        -- Add trail point
+        -- Add trail point every frame for smoother trail
         table.insert(star.trail, 1, {x = star.x, y = star.y})
-        if #star.trail > 8 then table.remove(star.trail) end
+        if #star.trail > 20 then table.remove(star.trail) end  -- Longer trail (was 8)
         -- Remove when off-screen or too old
         if star.age > star.life or star.y > GROUND_Y or star.x > GAME_WIDTH + 50 then
             table.remove(fallingStars, i)
         end
     end
 
-    -- Occasionally spawn a falling star (rare)
-    if math.random() < 0.001 then  -- ~0.1% chance per frame
+    -- Occasionally spawn a falling star/comet (slightly more common)
+    if math.random() < 0.002 then  -- ~0.2% chance per frame (was 0.1%)
         table.insert(fallingStars, {
             x = math.random(100, GAME_WIDTH - 100),
             y = math.random(20, 150),
-            vx = math.random(200, 400),
-            vy = math.random(150, 300),
+            vx = math.random(250, 450),
+            vy = math.random(180, 350),
             age = 0,
-            life = math.random() * 0.5 + 0.3,
-            brightness = math.random() * 0.3 + 0.7,
+            life = math.random() * 0.6 + 0.4,  -- Slightly longer life
+            brightness = math.random() * 0.2 + 0.8,  -- Brighter
             trail = {},
         })
     end
@@ -430,19 +438,34 @@ function Background.draw(W, H, cameraOffsetX)
         love.graphics.circle("fill", starX, star.y, star.radius)
     end
 
-    -- ── Falling stars (shooting stars) ──
+    -- ── Falling stars / Comets with glowing trails ──
     for _, fstar in ipairs(fallingStars) do
         local alpha = fstar.brightness * (1 - fstar.age / fstar.life)
-        -- Draw trail
+        local trailLen = #fstar.trail
+
+        -- Draw outer glow trail (larger, more transparent)
         for i, pt in ipairs(fstar.trail) do
-            local trailAlpha = alpha * (1 - i / #fstar.trail) * 0.6
-            local trailSize = 2 * (1 - i / #fstar.trail)
+            local t = 1 - i / trailLen
+            local glowAlpha = alpha * t * 0.3
+            local glowSize = 6 * t
+            love.graphics.setColor(COLORS.fallingStar[1], COLORS.fallingStar[2], COLORS.fallingStar[3], glowAlpha)
+            love.graphics.circle("fill", pt.x, pt.y, glowSize)
+        end
+
+        -- Draw core trail (brighter, smaller)
+        for i, pt in ipairs(fstar.trail) do
+            local t = 1 - i / trailLen
+            local trailAlpha = alpha * t * 0.9  -- Brighter (was 0.6)
+            local trailSize = 3.5 * t  -- Larger (was 2)
             love.graphics.setColor(COLORS.fallingStar[1], COLORS.fallingStar[2], COLORS.fallingStar[3], trailAlpha)
             love.graphics.circle("fill", pt.x, pt.y, trailSize)
         end
-        -- Draw head
+
+        -- Draw head with glow
+        love.graphics.setColor(COLORS.fallingStar[1], COLORS.fallingStar[2], COLORS.fallingStar[3], alpha * 0.4)
+        love.graphics.circle("fill", fstar.x, fstar.y, 6)  -- Outer glow
         love.graphics.setColor(COLORS.fallingStar[1], COLORS.fallingStar[2], COLORS.fallingStar[3], alpha)
-        love.graphics.circle("fill", fstar.x, fstar.y, 2.5)
+        love.graphics.circle("fill", fstar.x, fstar.y, 3.5)  -- Core (was 2.5)
     end
 
     -- ── Far clouds (behind mountains, reactive: brighten on lightning) ──
