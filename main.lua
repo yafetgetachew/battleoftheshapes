@@ -1692,6 +1692,16 @@ function processNetworkMessages()
             Sounds.stopMusic()
             Sounds.startMenuMusic()
 
+        elseif msg.type == "network_error" then
+            local errText = tostring(msg.error or "unknown")
+            print("Network error: " .. errText)
+            if msg.previousRole == Network.ROLE_HOST then
+                menuStatus = "Network host error: " .. errText
+                gameState = "menu"
+                Sounds.stopMusic()
+                Sounds.startMenuMusic()
+            end
+
         elseif msg.type == "sel_browse" then
             -- Remote player is browsing shapes
             local data = msg.data

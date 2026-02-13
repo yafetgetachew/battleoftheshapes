@@ -393,6 +393,10 @@ processNetworkMessages = function()
                 -- Relay to other clients
                 Network.relay(data.pid, "player_name", data, true)
             end
+
+        elseif msg.type == "network_error" then
+            log("NETWORK ERROR: " .. tostring(msg.error or "unknown"))
+            love.event.quit(1)
         end
     end
 end

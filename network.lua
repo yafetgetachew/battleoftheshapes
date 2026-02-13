@@ -140,12 +140,22 @@ end
 function Network.stop()
     if host then
         if role == Network.ROLE_HOST then
-            for _, peer in pairs(peers) do peer:disconnect_now() end
+            for _, peer in pairs(peers) do
+                pcall(function()
+                    peer:disconnect_now()
+                end)
+            end
         elseif role == Network.ROLE_CLIENT and serverPeer then
-            serverPeer:disconnect_now()
+            pcall(function()
+                serverPeer:disconnect_now()
+            end)
         end
-        host:flush()
-        host:destroy()
+        pcall(function()
+            host:flush()
+        end)
+        pcall(function()
+            host:destroy()
+        end)
     end
     host = nil
     peers = {}
@@ -155,6 +165,37 @@ function Network.stop()
     localPlayerId = 1
     dedicatedServer = false
     incomingMessages = {}
+end
+
+local function serviceHost(timeoutMs)
+    if not host then return nil end
+
+    local ok, eventOrErr = pcall(host.service, host, timeoutMs or 0)
+    if ok then
+        return eventOrErr
+    end
+
+    local previousRole = role
+    local errText = tostring(eventOrErr)
+
+    -- ENet may throw from :service() when the socket becomes invalid.
+    -- Tear everything down so future updates don't repeatedly throw.
+    Network.stop()
+
+    incomingMessages[#incomingMessages + 1] = {
+        type = "network_error",
+        source = "service",
+        previousRole = previousRole,
+        error = errText
+    }
+    if previousRole == Network.ROLE_CLIENT then
+        incomingMessages[#incomingMessages + 1] = {
+            type = "disconnected",
+            reason = "service_error",
+            error = errText
+        }
+    end
+    return nil
 end
 
 -- ─────────────────────────────────────────────
@@ -487,7 +528,7 @@ end
 
 function Network.update(dt)
     if not host then return end
-    local event = host:service(0)
+    local event = serviceHost(0)
     while event do
         if event.type == "connect" then
             if role == Network.ROLE_HOST then
@@ -554,7 +595,7 @@ function Network.update(dt)
                 table.insert(incomingMessages, {type = "disconnected"})
             end
         end
-        event = host:service(0)
+        event = serviceHost(0)
     end
 
 end
