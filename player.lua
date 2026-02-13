@@ -90,6 +90,9 @@ function Player.new(id, controls)
     -- Landing detection
     self._wasOnGround    = true        -- previous frame's onGround state
     self._justLanded     = false       -- true for one frame after landing
+    -- Fall damage tracking
+    self._maxHeightY     = 0           -- lowest Y value (highest point) reached while airborne
+    self._fallDamage     = 0           -- damage taken from last fall (consumed after landing)
     -- Idle breathing animation
     self._idleTime       = 0           -- time spent idle (not moving)
     -- Death detection
@@ -101,6 +104,9 @@ function Player.new(id, controls)
     self._squashY        = 1.0         -- vertical scale (1.0 = normal)
     self._squashTimer    = 0           -- time remaining for squash effect
     self._squashDuration = 0           -- total duration of current squash
+    -- Speech bubble
+    self._speechBubble   = nil         -- current speech bubble text
+    self._speechTimer    = 0           -- time remaining to show bubble
     return self
 end
 
@@ -124,6 +130,7 @@ function Player:spawn(x, y)
     self.vx = 0
     self.vy = 0
     self.onGround = true  -- Set initial ground state to prevent floating on first frame
+    self.jumpCount = 0    -- Reset jump count to allow jumping after spawn
 end
 
 function Player:handleInput(dt)
@@ -275,6 +282,8 @@ function Player:update(dt)
             self.dashCooldown = self.dashCooldown - dt
             if self.dashCooldown < 0 then self.dashCooldown = 0 end
         end
+        -- Update speech bubble for remote players too
+        self:updateSpeechBubble(dt)
         return
     end
 
@@ -285,11 +294,39 @@ function Player:update(dt)
 
     Physics.updatePlayer(self, dt)
 
+    -- Track maximum height while airborne (lowest Y = highest point)
+    if not self.onGround then
+        if self.y < self._maxHeightY then
+            self._maxHeightY = self.y
+        end
+    end
+
     -- Detect landing (was in air, now on ground)
     self._justLanded = false
+    self._fallDamage = 0
     if self.onGround and not wasOnGround then
         self._justLanded = true
         self.jumpCount = 0  -- Reset jump count on landing
+
+        -- Calculate fall damage
+        -- Fall from highest platform (y=300) to ground (y=620) = 320 pixels = 5 damage
+        -- Minimum fall distance for damage = 150 pixels (roughly 1 platform height)
+        local fallDistance = self.y - self._maxHeightY
+        local MIN_FALL_FOR_DAMAGE = 150
+        local MAX_FALL_DISTANCE = 320  -- Highest platform to ground
+        local MAX_FALL_DAMAGE = 5
+
+        if fallDistance > MIN_FALL_FOR_DAMAGE then
+            local damageRatio = (fallDistance - MIN_FALL_FOR_DAMAGE) / (MAX_FALL_DISTANCE - MIN_FALL_FOR_DAMAGE)
+            self._fallDamage = math.floor(damageRatio * MAX_FALL_DAMAGE + 0.5)
+            self._fallDamage = math.max(0, math.min(MAX_FALL_DAMAGE, self._fallDamage))
+        end
+
+        -- Reset max height tracking
+        self._maxHeightY = self.y
+    elseif self.onGround then
+        -- Keep tracking current position as "max height" when on ground
+        self._maxHeightY = self.y
     end
     self._wasOnGround = self.onGround
 
@@ -334,6 +371,9 @@ function Player:update(dt)
     else
         self._idleTime = self._idleTime + dt
     end
+
+    -- Update speech bubble timer
+    self:updateSpeechBubble(dt)
 end
 
 -- Check if player just landed (and consume the event)
@@ -343,6 +383,13 @@ function Player:consumeLanding()
         return true
     end
     return false
+end
+
+-- Get fall damage (and consume the event)
+function Player:consumeFallDamage()
+    local damage = self._fallDamage
+    self._fallDamage = 0
+    return damage
 end
 
 -- Get idle breathing scale (1.0 to 1.02)
@@ -397,6 +444,77 @@ function Player:getSquashScale()
     local sx = 1.0 + (self._squashX - 1.0) * easeT
     local sy = 1.0 + (self._squashY - 1.0) * easeT
     return sx, sy
+end
+
+-- Show a speech bubble above the player
+function Player:showSpeechBubble(text, duration)
+    self._speechBubble = text
+    self._speechTimer = duration or 3.0
+end
+
+-- Update speech bubble timer (called from update)
+function Player:updateSpeechBubble(dt)
+    if self._speechTimer > 0 then
+        self._speechTimer = self._speechTimer - dt
+        if self._speechTimer <= 0 then
+            self._speechBubble = nil
+        end
+    end
+end
+
+-- Draw speech bubble above the player
+function Player:drawSpeechBubble()
+    if not self._speechBubble or self._speechTimer <= 0 then return end
+
+    local text = self._speechBubble
+    local font = love.graphics.getFont()
+    local scale = GLOBAL_SCALE or 1
+
+    -- Position above player name
+    local bubbleY = self.y - self.shapeHeight / 2 - 50
+
+    -- Fade out in the last 0.5 seconds
+    local alpha = math.min(1.0, self._speechTimer / 0.5)
+
+    -- Slight bounce animation
+    local bounce = math.sin(love.timer.getTime() * 4) * 2
+    bubbleY = bubbleY + bounce
+
+    love.graphics.push()
+    love.graphics.translate(self.x, bubbleY)
+    love.graphics.scale(1/scale, 1/scale)
+
+    -- Measure text
+    local textWidth = font:getWidth(text)
+    local textHeight = font:getHeight()
+    local padding = 8 * scale
+    local bubbleWidth = textWidth + padding * 2
+    local bubbleHeight = textHeight + padding * 2
+
+    -- Draw bubble background (rounded rectangle)
+    love.graphics.setColor(1, 1, 1, 0.9 * alpha)
+    love.graphics.rectangle("fill", -bubbleWidth/2, -bubbleHeight/2, bubbleWidth, bubbleHeight, 6, 6)
+
+    -- Draw bubble border
+    love.graphics.setColor(0.3, 0.3, 0.3, 0.8 * alpha)
+    love.graphics.setLineWidth(2)
+    love.graphics.rectangle("line", -bubbleWidth/2, -bubbleHeight/2, bubbleWidth, bubbleHeight, 6, 6)
+
+    -- Draw speech bubble tail (triangle pointing down)
+    love.graphics.setColor(1, 1, 1, 0.9 * alpha)
+    love.graphics.polygon("fill",
+        -6, bubbleHeight/2 - 1,
+        6, bubbleHeight/2 - 1,
+        0, bubbleHeight/2 + 10)
+    love.graphics.setColor(0.3, 0.3, 0.3, 0.8 * alpha)
+    love.graphics.line(-6, bubbleHeight/2, 0, bubbleHeight/2 + 10)
+    love.graphics.line(6, bubbleHeight/2, 0, bubbleHeight/2 + 10)
+
+    -- Draw text
+    love.graphics.setColor(0.1, 0.1, 0.1, alpha)
+    love.graphics.printf(text, -bubbleWidth/2, -textHeight/2, bubbleWidth, "center")
+
+    love.graphics.pop()
 end
 
 -- Apply knockback from a hit (direction: 1 = right, -1 = left)
@@ -611,6 +729,9 @@ function Player:draw(isGameOver)
             self.x - 10, arrowY,
             self.x - 2, arrowY + 4)
     end
+
+    -- Draw speech bubble above the player
+    self:drawSpeechBubble()
 end
 
 -- Draw shadow on the ground beneath the player

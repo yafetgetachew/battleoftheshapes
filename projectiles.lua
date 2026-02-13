@@ -6,6 +6,7 @@ local Physics = require("physics")
 local Sounds  = require("sounds")
 local Dropbox = require("dropbox")
 local Network = require("network")
+local Pacman  = require("pacman")
 
 -- Knockback constant (matches Player.PROJECTILE_KNOCKBACK, duplicated to avoid circular require)
 local PROJECTILE_KNOCKBACK = 180
@@ -163,6 +164,16 @@ function Projectiles.update(dt, players)
 
         -- Only host (or solo/demo) applies damage; clients just show effects
         local isAuthority = Network.getRole() ~= Network.ROLE_CLIENT
+
+        -- Check collision with pacman monsters (only authority can damage them)
+        if not hit and isAuthority then
+            local dmg = p.damage or Projectiles.DAMAGE
+            if Pacman.hitMonster(p.x, p.y, Projectiles.FIREBALL_RADIUS, dmg, p.owner, players) then
+                Projectiles._spawnHitEffect(p.x, p.y, p.type)
+                Sounds.play("fireball_hit")
+                hit = true
+            end
+        end
 
 	    -- Check collision with target player
 	    if not hit then

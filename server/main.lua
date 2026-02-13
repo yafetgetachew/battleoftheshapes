@@ -90,7 +90,10 @@ local Abilities   = require("abilities")
 local Network     = require("network")
 local Lightning   = require("lightning")
 local Dropbox     = require("dropbox")
+local Saw         = require("saw")
+local Pacman      = require("pacman")
 local Sounds      = require("sounds")
+local Map         = require("map")
 
 -- Override port if specified
 if port ~= 27015 then
@@ -187,14 +190,24 @@ function love.update(dt)
         if countdownTimer <= 0 then
             gameState = "playing"
             Lightning.reset()
+            Saw.reset()
+            Pacman.reset()
             log("FIGHT!")
         end
 
     elseif gameState == "playing" then
+        -- Update map (platform animation)
+        Map.update(dt)
+
         -- Update all players (will regen for remote players)
         for _, p in ipairs(players) do
             if p.life > 0 then
                 p:update(dt)
+                -- Apply fall damage (server is always authoritative)
+                local fallDamage = p:consumeFallDamage()
+                if fallDamage > 0 then
+                    p.life = p.life - fallDamage
+                end
             end
         end
 
@@ -215,6 +228,12 @@ function love.update(dt)
 
         -- Update dropboxes (host-authoritative)
         Dropbox.update(dt, players)
+
+        -- Update saws (host-authoritative)
+        Saw.update(dt, players)
+
+        -- Update pacman monsters (host-authoritative)
+        Pacman.update(dt, players)
 
         -- Network sync: broadcast all state
         networkSyncTimer = networkSyncTimer + dt
@@ -437,8 +456,47 @@ sendGameState = function()
         }
     end
 
+    -- Collect saw state
+    local ss = Saw.getState()
+    local sawData = {
+        sc = #(ss.saws or {}), wc = #(ss.warnings or {}),
+        nt = ss.nextSpawnTimer, idc = ss.sawIdCounter,
+        saws = {}, warnings = {}
+    }
+    for i, saw in ipairs(ss.saws or {}) do
+        sawData.saws[i] = {
+            id = saw.id, x = saw.x, y = saw.y,
+            vx = saw.vx, vy = saw.vy,
+            rotation = saw.rotation, age = saw.age,
+            onGround = saw.onGround and 1 or 0
+        }
+    end
+    for i, warning in ipairs(ss.warnings or {}) do
+        sawData.warnings[i] = {x = warning.x, age = warning.age}
+    end
+
+    -- Collect pacman state
+    local ps = Pacman.getState()
+    local pacmanData = {
+        mc = #(ps.monsters or {}),
+        nt = ps.nextSpawnTimer,
+        hs = ps.hasSpawnedOnce,
+        idc = ps.monsterIdCounter or 0,
+        monsters = {}
+    }
+    for i, monster in ipairs(ps.monsters or {}) do
+        pacmanData.monsters[i] = {
+            id = monster.id, x = monster.x, y = monster.y,
+            vx = monster.vx, vy = monster.vy or 0,
+            direction = monster.direction,
+            hp = monster.hp, age = monster.age,
+            mouthAngle = monster.mouthAngle,
+            onGround = monster.onGround and 1 or 0
+        }
+    end
+
     -- Send everything in one compact message
-    local encoded = Network.encodeTick(playerStates, lightningData, dropboxData)
+    local encoded = Network.encodeTick(playerStates, lightningData, dropboxData, sawData, pacmanData)
     Network.sendRaw(encoded, false)
 end
 
@@ -450,6 +508,8 @@ startCountdown = function()
     Projectiles.clear()
     Abilities.clear()
     Dropbox.reset()
+    Saw.reset()
+    Pacman.reset()
 
     -- Find which players are connected/active
     local activePlayers = {}
@@ -543,6 +603,8 @@ restartGame = function()
     Abilities.clear()
     Lightning.reset()
     Dropbox.reset()
+    Saw.reset()
+    Pacman.reset()
     networkSyncTimer = 0
 
     -- Reset players but preserve names

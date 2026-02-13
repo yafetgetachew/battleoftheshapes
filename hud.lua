@@ -22,9 +22,9 @@ local function ensureFonts()
     _statFont = love.graphics.newFont(FONT_PATH, math.floor(11 * scale))
 end
 
-local BAR_WIDTH  = 240
-local BAR_HEIGHT = 18
-local WILL_HEIGHT = 10
+local BAR_WIDTH  = 150
+local BAR_HEIGHT = 14
+local WILL_HEIGHT = 8
 local MARGIN     = 20
 local TOP_Y      = 14
 
@@ -48,14 +48,28 @@ local function drawSharpText(text, x, y, width, align, font)
     love.graphics.pop()
 end
 
+-- Filter to only include active players (those with a shape selected)
+local function getActivePlayers(players)
+    local active = {}
+    for _, player in ipairs(players) do
+        if player.shapeKey then
+            active[#active + 1] = player
+        end
+    end
+    return active
+end
+
 local function getOrderedPlayers(players, localPlayerId)
     local ordered = {}
     local localEntry = nil
     for _, player in ipairs(players) do
-        if player.id == localPlayerId then
-            localEntry = player
-        else
-            ordered[#ordered + 1] = player
+        -- Only include active players (those with a shape selected)
+        if player.shapeKey then
+            if player.id == localPlayerId then
+                localEntry = player
+            else
+                ordered[#ordered + 1] = player
+            end
         end
     end
     table.sort(ordered, function(a, b) return a.id < b.id end)
@@ -67,20 +81,24 @@ end
 
 -- Draw HUD for all players.
 -- Uses a classic full-bar layout for up to 4 players, and a compact board for larger lobbies.
+-- Only draws health bars for active players (those with a shape selected).
 function HUD.draw(players, gameWidth, gameHeight, localPlayerId)
     local W = gameWidth or 1280
     local H = gameHeight or 720
-    local count = #players
+    -- Filter to only active players
+    local activePlayers = getActivePlayers(players)
+    local count = #activePlayers
+    if count == 0 then return end
     if count <= 4 then
         local gap = 20
         local totalW = BAR_WIDTH * count + gap * (count - 1)
         local startX = (W - totalW) / 2
-        for i, player in ipairs(players) do
+        for i, player in ipairs(activePlayers) do
             local x = startX + (i - 1) * (BAR_WIDTH + gap)
             HUD.drawPlayerInfo(player, x, TOP_Y, BAR_WIDTH)
         end
     else
-        HUD.drawCompactBoard(players, W, H, localPlayerId)
+        HUD.drawCompactBoard(activePlayers, W, H, localPlayerId)
     end
 end
 

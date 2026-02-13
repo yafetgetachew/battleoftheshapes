@@ -2,6 +2,7 @@
 -- Shape selection screen for up to 12 players (networked) - 4x3 grid layout
 
 local Shapes = require("shapes")
+local Projectiles = require("projectiles")
 
 local Selection = {}
 
@@ -248,16 +249,20 @@ function Selection:draw(gameWidth, gameHeight, controls, players)
             love.graphics.setFont(statsFont)
             DrawSharpText(def.name, px, py + 115, cellW, "center")
 
-            -- Stats (compact)
+            -- Stats (compact) - Row 1: HP, WP, DMG
             love.graphics.setFont(smallFont)
             local sy = py + 132
             love.graphics.setColor(0.9, 0.4, 0.4)
-            DrawSharpText("HP:" .. def.life, px + 8, sy, 60, "left")
+            DrawSharpText("HP:" .. def.life, px + 8, sy, 55, "left")
             love.graphics.setColor(0.4, 0.7, 1.0)
-            DrawSharpText("WP:" .. def.will, px + 68, sy, 60, "left")
+            DrawSharpText("WP:" .. def.will, px + 63, sy, 50, "left")
+            love.graphics.setColor(1.0, 0.5, 0.2)
+            DrawSharpText("DMG:" .. Projectiles.DAMAGE, px + 113, sy, 55, "left")
+            -- Row 2: SPD, JMP
+            local sy2 = sy + 14
             love.graphics.setColor(0.7, 0.7, 0.7)
-            DrawSharpText("SPD:" .. def.speed, px + 128, sy, 70, "left")
-            DrawSharpText("JMP:" .. math.abs(def.jumpForce), px + 198, sy, 80, "left")
+            DrawSharpText("SPD:" .. def.speed, px + 8, sy2, 70, "left")
+            DrawSharpText("JMP:" .. math.abs(def.jumpForce), px + 88, sy2, 80, "left")
 
             -- Navigation arrows (local player only, not confirmed)
             if p == self.localPlayerId and not self.confirmed[p] then

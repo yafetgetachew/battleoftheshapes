@@ -13,8 +13,11 @@ local Lightning   = require("lightning")
 local Sounds      = require("sounds")
 local Config      = require("config")
 local Dropbox     = require("dropbox")
+local Saw         = require("saw")
+local Pacman      = require("pacman")
 local Background  = require("background")
 local Map         = require("map")
+local Shapes      = require("shapes")
 
 -- Game states: "splash", "menu", "settings", "connecting", "selection", "countdown", "playing", "gameover"
 -- (Note: "browsing" state was removed - use "Join by IP" instead)
@@ -373,6 +376,35 @@ function love.load()
         Sounds.playLightningWarning()  -- Start warning sound ramp
     end
 
+    -- Set up saw hit callbacks for juice effects
+    Saw.onHit = function(x, y, damage, playerId)
+        spawnDamageNumber(x, y, damage)
+        addScreenShake(3, 0.1, 15)  -- Small screen shake on saw hit
+    end
+    Saw.onWarningStart = function(x)
+        Sounds.playSawWarning()  -- Start saw warning sound
+    end
+    Saw.onSawSpawn = function(x)
+        Sounds.play("saw_spawn")
+    end
+    Saw.onBounce = function(x, y)
+        Sounds.play("saw_bounce")
+        addScreenShake(2, 0.05, 10)  -- Tiny shake on bounce
+    end
+
+    -- Set up pacman monster callbacks for juice effects
+    Pacman.onBite = function(x, y, damage, playerId)
+        spawnDamageNumber(x, y, damage)
+        addScreenShake(5, 0.15, 20)
+    end
+    Pacman.onKill = function(x, y, killerId)
+        addScreenShake(8, 0.3, 25)
+        addCameraZoom(1.03, 0.2)
+    end
+    Pacman.onSpawn = function()
+        addScreenShake(3, 0.2, 15)
+    end
+
     -- Set up dash collision callbacks for juice effects
     Physics.onDashHit = function(x, y, damage)
         spawnDamageNumber(x, y, damage)
@@ -476,8 +508,19 @@ function love.update(dt)
             gameState = "playing"
             Lightning.reset()
             Dropbox.reset()
+            Saw.reset()
+            Pacman.reset()
             Sounds.startMusic()  -- Start background music when gameplay begins
             Background.onMatchStart()  -- Moon glow pulse
+            -- Show speech bubbles for all players at match start
+            for _, p in ipairs(players) do
+                if p.shapeKey then
+                    local quote = Shapes.getRandomQuote(p.shapeKey)
+                    if quote then
+                        p:showSpeechBubble(quote, 3.0)  -- Show for 3 seconds
+                    end
+                end
+            end
         end
 
     elseif gameState == "playing" then
@@ -488,6 +531,9 @@ function love.update(dt)
             Network.update(dt)
             processNetworkMessages()
 
+            -- Update map (platform animation)
+            Map.update(dt)
+
             -- Update all players
             for _, p in ipairs(players) do
                 if p.life > 0 then
@@ -496,6 +542,16 @@ function love.update(dt)
                     if p:consumeLanding() then
                         Sounds.play("land")
                         Projectiles.spawnLandingDust(p.x, p.y + p.shapeHeight / 2)
+                    end
+                    -- Apply fall damage (host-authoritative)
+                    if Network.getRole() == Network.ROLE_HOST or Network.getRole() == Network.ROLE_NONE then
+                        local fallDamage = p:consumeFallDamage()
+                        if fallDamage > 0 then
+                            p.life = p.life - fallDamage
+                            spawnDamageNumber(p.x, p.y - p.shapeHeight/2, fallDamage)
+                            Sounds.play("hit")
+                            addScreenShake(2, 0.1, 10)
+                        end
                     end
                 end
             end
@@ -530,6 +586,22 @@ function love.update(dt)
 
             -- Update dropboxes
             Dropbox.update(dt, players)
+
+            -- Update saws (host-authoritative)
+            if Network.getRole() == Network.ROLE_HOST or Network.getRole() == Network.ROLE_NONE then
+                Saw.update(dt, players)
+            else
+                -- Clients just update visual state
+                Saw.update(dt, players)
+            end
+
+            -- Update pacman monsters (host-authoritative)
+            if Network.getRole() == Network.ROLE_HOST or Network.getRole() == Network.ROLE_NONE then
+                Pacman.update(dt, players)
+            else
+                -- Clients just update visual state
+                Pacman.update(dt, players)
+            end
 
             -- Check for player deaths (explosion effect)
             for _, p in ipairs(players) do
@@ -689,6 +761,12 @@ function love.draw()
 
         -- ── Dropboxes ──
         Dropbox.draw()
+
+        -- ── Saws ──
+        Saw.draw()
+
+        -- ── Pacman Monsters ──
+        Pacman.draw()
 
         -- ── Lightning (world elements only) ──
         Lightning.draw(W, H)
@@ -1741,7 +1819,7 @@ function processNetworkMessages()
         elseif msg.type == "tick" then
             -- Client receives compact batched game state from host
             if Network.getRole() == Network.ROLE_CLIENT then
-                local playerStates, lightningData, dropboxData = Network.decodeTick(msg.raw)
+                local playerStates, lightningData, dropboxData, sawData, pacmanData = Network.decodeTick(msg.raw)
                 -- Apply player states
                 for _, ps in ipairs(playerStates) do
                     applyGameState(ps)
@@ -1772,6 +1850,23 @@ function processNetworkMessages()
                         boxes = dropboxData.boxes or {},
                         charges = dropboxData.charges or {},
                         spawnTimer = dropboxData.st or 10
+                    })
+                end
+                -- Apply saw state
+                if sawData and sawData.sc ~= nil then
+                    Saw.setState({
+                        saws = sawData.saws or {},
+                        warnings = sawData.warnings or {},
+                        nextSpawnTimer = sawData.nt or 8,
+                        sawIdCounter = sawData.sawIdCounter or 0
+                    })
+                end
+                -- Apply pacman state
+                if pacmanData and pacmanData.mc ~= nil then
+                    Pacman.setState({
+                        monsters = pacmanData.monsters or {},
+                        nextSpawnTimer = pacmanData.nt or 30,
+                        hasSpawnedOnce = pacmanData.hasSpawnedOnce or false
                     })
                 end
             end
@@ -1866,6 +1961,8 @@ function processNetworkMessages()
             Abilities.clear()
             Lightning.reset()
             Dropbox.reset()
+            Saw.reset()
+            Pacman.reset()
             local prevConnected = selection and selection.connected or nil
             -- Preserve player names
             local savedNames = {}
@@ -1965,8 +2062,47 @@ function sendGameState()
         }
     end
 
+    -- Collect saw state
+    local ss = Saw.getState()
+    local sawData = {
+        sc = #(ss.saws or {}), wc = #(ss.warnings or {}),
+        nt = ss.nextSpawnTimer, idc = ss.sawIdCounter,
+        saws = {}, warnings = {}
+    }
+    for i, saw in ipairs(ss.saws or {}) do
+        sawData.saws[i] = {
+            id = saw.id, x = saw.x, y = saw.y,
+            vx = saw.vx, vy = saw.vy,
+            rotation = saw.rotation, age = saw.age,
+            onGround = saw.onGround and 1 or 0
+        }
+    end
+    for i, warning in ipairs(ss.warnings or {}) do
+        sawData.warnings[i] = {x = warning.x, age = warning.age}
+    end
+
+    -- Collect pacman state
+    local ps = Pacman.getState()
+    local pacmanData = {
+        mc = #(ps.monsters or {}),
+        nt = ps.nextSpawnTimer,
+        hs = ps.hasSpawnedOnce,
+        idc = ps.monsterIdCounter or 0,
+        monsters = {}
+    }
+    for i, monster in ipairs(ps.monsters or {}) do
+        pacmanData.monsters[i] = {
+            id = monster.id, x = monster.x, y = monster.y,
+            vx = monster.vx, vy = monster.vy or 0,
+            direction = monster.direction,
+            hp = monster.hp, age = monster.age,
+            mouthAngle = monster.mouthAngle,
+            onGround = monster.onGround and 1 or 0
+        }
+    end
+
     -- Send everything in one compact message
-    local encoded = Network.encodeTick(playerStates, lightningData, dropboxData)
+    local encoded = Network.encodeTick(playerStates, lightningData, dropboxData, sawData, pacmanData)
     Network.sendRaw(encoded, false)
 end
 
@@ -2092,6 +2228,8 @@ function returnToMenu()
     Abilities.clear()
     Lightning.reset()
     Dropbox.reset()
+    Saw.reset()
+    Pacman.reset()
     gameState = "menu"
     menuStatus = ""
     menuChoice = 1
@@ -2156,6 +2294,8 @@ function restartGame()
         Abilities.clear()
         Lightning.reset()
         Dropbox.reset()
+        Saw.reset()
+        Pacman.reset()
         networkSyncTimer = 0
 
         -- Preserve player names across restart
@@ -2327,6 +2467,8 @@ function startDemoMode()
     gameState = "countdown"
     Lightning.reset()
     Dropbox.reset()
+    Saw.reset()
+    Pacman.reset()
 
     -- Initialize camera to correct position immediately
     initCamera(players)
@@ -2339,11 +2481,16 @@ function restartDemoMode()
     Abilities.clear()
     Lightning.reset()
     Dropbox.reset()
+    Saw.reset()
+    Pacman.reset()
     startDemoMode()
 end
 
 -- Update demo mode (called from love.update when demoMode is true)
 function updateDemoMode(dt)
+    -- Update map (platform animation)
+    Map.update(dt)
+
     -- Update all players
     for _, p in ipairs(players) do
         if p.life > 0 then
@@ -2352,6 +2499,14 @@ function updateDemoMode(dt)
             if p:consumeLanding() then
                 Sounds.play("land")
                 Projectiles.spawnLandingDust(p.x, p.y + p.shapeHeight / 2)
+            end
+            -- Apply fall damage (demo mode is always authoritative)
+            local fallDamage = p:consumeFallDamage()
+            if fallDamage > 0 then
+                p.life = p.life - fallDamage
+                spawnDamageNumber(p.x, p.y - p.shapeHeight/2, fallDamage)
+                Sounds.play("hit")
+                addScreenShake(2, 0.1, 10)
             end
         end
     end
@@ -2391,6 +2546,12 @@ function updateDemoMode(dt)
 
     -- Update dropboxes
     Dropbox.update(dt, players)
+
+    -- Update saws
+    Saw.update(dt, players)
+
+    -- Update pacman monsters
+    Pacman.update(dt, players)
 
     -- Check for player deaths (explosion effect)
     for _, p in ipairs(players) do

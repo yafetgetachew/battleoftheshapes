@@ -173,8 +173,8 @@ function Network.sendRaw(rawStr, reliable)
 end
 
 -- Encode all game state into a single compact tick message
--- Format: T;pid,x,y,vx,vy,life,will,f,a,db,ds,aimX,aimY,dash,dashDir;...;L,sc,wc,nt,s1x,s1a,...,w1x,w1a,...;D,bc,cc,st,b1x,b1y,b1vx,b1vy,b1og,...,c1x,c1y,c1a,c1k,...
-function Network.encodeTick(playerStates, lightningState, dropboxState)
+-- Format: T;pid,x,y,vx,vy,life,will,f,a,db,ds,aimX,aimY,dash,dashDir;...;L,sc,wc,nt,s1x,s1a,...,w1x,w1a,...;D,bc,cc,st,b1x,b1y,b1vx,b1vy,b1og,...,c1x,c1y,c1a,c1k,...;S,sc,wc,nt,s1id,s1x,s1y,s1vx,s1vy,s1rot,s1age,...,w1x,w1age,...;P,mc,nt,hs,idc,m1id,m1x,m1y,m1vx,m1vy,m1dir,m1hp,m1age,m1ma,m1og,...
+function Network.encodeTick(playerStates, lightningState, dropboxState, sawState, pacmanState)
     local parts = {"T"}
 
     -- Player sections (only alive players)
@@ -226,6 +226,48 @@ function Network.encodeTick(playerStates, lightningState, dropboxState)
     end
     parts[#parts + 1] = table.concat(dparts, ",")
 
+    -- Saw section
+    local ss = sawState or {}
+    local sparts = {"S", ss.sc or 0, ss.wc or 0, ss.nt or 8, ss.idc or 0}
+    if ss.saws then
+        for _, s in ipairs(ss.saws) do
+            sparts[#sparts + 1] = s.id
+            sparts[#sparts + 1] = s.x
+            sparts[#sparts + 1] = s.y
+            sparts[#sparts + 1] = s.vx
+            sparts[#sparts + 1] = s.vy
+            sparts[#sparts + 1] = s.rotation
+            sparts[#sparts + 1] = s.age
+            sparts[#sparts + 1] = s.onGround and 1 or 0
+        end
+    end
+    if ss.warnings then
+        for _, w in ipairs(ss.warnings) do
+            sparts[#sparts + 1] = w.x
+            sparts[#sparts + 1] = w.age
+        end
+    end
+    parts[#parts + 1] = table.concat(sparts, ",")
+
+    -- Pacman section
+    local ps = pacmanState or {}
+    local pparts = {"P", ps.mc or 0, ps.nt or 30, ps.hs and 1 or 0, ps.idc or 0}
+    if ps.monsters then
+        for _, m in ipairs(ps.monsters) do
+            pparts[#pparts + 1] = m.id
+            pparts[#pparts + 1] = m.x
+            pparts[#pparts + 1] = m.y
+            pparts[#pparts + 1] = m.vx
+            pparts[#pparts + 1] = m.vy or 0
+            pparts[#pparts + 1] = m.direction
+            pparts[#pparts + 1] = m.hp
+            pparts[#pparts + 1] = m.age
+            pparts[#pparts + 1] = m.mouthAngle
+            pparts[#pparts + 1] = m.onGround or 0
+        end
+    end
+    parts[#parts + 1] = table.concat(pparts, ",")
+
     return table.concat(parts, ";")
 end
 
@@ -239,6 +281,8 @@ function Network.decodeTick(raw)
     local playerStates = {}
     local lightningState = {}
     local dropboxState = {}
+    local sawState = {}
+    local pacmanState = {}
 
     for i = 2, #sections do
         local sec = sections[i]
@@ -298,6 +342,64 @@ function Network.decodeTick(raw)
                 idx = idx + 4
             end
             dropboxState = {bc = bc, cc = cc, st = st, boxes = boxes, charges = charges}
+        elseif firstChar == "S" then
+            -- Saw: S,sc,wc,nt,idc,s1id,s1x,s1y,s1vx,s1vy,s1rot,s1age,s1og,...,w1x,w1age,...
+            local vals = {}
+            for v in sec:gmatch("[^,]+") do vals[#vals + 1] = v end
+            local sc = tonumber(vals[2]) or 0
+            local wc = tonumber(vals[3]) or 0
+            local nt = tonumber(vals[4]) or 8
+            local idc = tonumber(vals[5]) or 0
+            local saws = {}
+            local idx = 6
+            for s = 1, sc do
+                saws[s] = {
+                    id = tonumber(vals[idx]) or 0,
+                    x = tonumber(vals[idx + 1]) or 0,
+                    y = tonumber(vals[idx + 2]) or 0,
+                    vx = tonumber(vals[idx + 3]) or 0,
+                    vy = tonumber(vals[idx + 4]) or 0,
+                    rotation = tonumber(vals[idx + 5]) or 0,
+                    age = tonumber(vals[idx + 6]) or 0,
+                    onGround = (tonumber(vals[idx + 7]) or 0) == 1
+                }
+                idx = idx + 8
+            end
+            local warnings = {}
+            for w = 1, wc do
+                warnings[w] = {
+                    x = tonumber(vals[idx]) or 0,
+                    age = tonumber(vals[idx + 1]) or 0
+                }
+                idx = idx + 2
+            end
+            sawState = {sc = sc, wc = wc, nt = nt, sawIdCounter = idc, saws = saws, warnings = warnings}
+        elseif firstChar == "P" then
+            -- Pacman: P,mc,nt,hs,idc,m1id,m1x,m1y,m1vx,m1vy,m1dir,m1hp,m1age,m1ma,m1og,...
+            local vals = {}
+            for v in sec:gmatch("[^,]+") do vals[#vals + 1] = v end
+            local mc = tonumber(vals[2]) or 0
+            local nt = tonumber(vals[3]) or 30
+            local hs = (tonumber(vals[4]) or 0) == 1
+            local idc = tonumber(vals[5]) or 0
+            local monsters = {}
+            local idx = 6
+            for m = 1, mc do
+                monsters[m] = {
+                    id = tonumber(vals[idx]) or 0,
+                    x = tonumber(vals[idx + 1]) or 0,
+                    y = tonumber(vals[idx + 2]) or 0,
+                    vx = tonumber(vals[idx + 3]) or 0,
+                    vy = tonumber(vals[idx + 4]) or 0,
+                    direction = tonumber(vals[idx + 5]) or 1,
+                    hp = tonumber(vals[idx + 6]) or 40,
+                    age = tonumber(vals[idx + 7]) or 0,
+                    mouthAngle = tonumber(vals[idx + 8]) or 0,
+                    onGround = (tonumber(vals[idx + 9]) or 0) == 1
+                }
+                idx = idx + 10
+            end
+            pacmanState = {mc = mc, nt = nt, hasSpawnedOnce = hs, monsterIdCounter = idc, monsters = monsters}
         else
             -- Player: pid,x,y,vx,vy,life,will,f,a,db,ds[,aimX,aimY,dash,dashDir]
             local vals = {}
@@ -324,7 +426,7 @@ function Network.decodeTick(raw)
         end
     end
 
-    return playerStates, lightningState, dropboxState
+    return playerStates, lightningState, dropboxState, sawState, pacmanState
 end
 
 -- Encode compact client state: C;pid,x,y,vx,vy,facing,aimX,aimY,dash,dashDir
