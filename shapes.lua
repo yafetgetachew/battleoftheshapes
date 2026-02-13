@@ -3,13 +3,52 @@
 
 local Shapes = {}
 
+-- Punny quotes for each shape (5 per shape, shown at match start)
+Shapes.quotes = {
+    square = {
+        "Time to be fair and SQUARE!",
+        "I've got all the right angles!",
+        "You're about to get BOXED in!",
+        "Four sides of PAIN coming up!",
+        "Let's settle this... SQUARELY!"
+    },
+    triangle = {
+        "Prepare for a POINTED defeat!",
+        "I'm always on the CUTTING edge!",
+        "This fight is going TRI my way!",
+        "You don't stand a POINT!",
+        "Time to TRI harder!"
+    },
+    circle = {
+        "What's the POINT? I don't have one!",
+        "ROUND one... FIGHT!",
+        "I'll run CIRCLES around you!",
+        "This battle will come full CIRCLE!",
+        "You're about to get ROLLED!"
+    },
+    rectangle = {
+        "I'm not SQUARE, I'm BETTER!",
+        "Time to STRETCH your limits!",
+        "I've got the LONG game covered!",
+        "Prepare for an EXTENDED beatdown!",
+        "You're in for a WIDE awakening!"
+    }
+}
+
+-- Get a random quote for a shape
+function Shapes.getRandomQuote(shapeKey)
+    local quotes = Shapes.quotes[shapeKey]
+    if not quotes then return nil end
+    return quotes[math.random(1, #quotes)]
+end
+
 Shapes.definitions = {
     square = {
         name = "Square",
         color = {0.2, 0.6, 1.0},       -- blue
         width = 48,
         height = 48,
-        life = 120,
+        life = 240,
         will = 80,
         speed = 325,                   -- 25% faster (was 260)
         jumpForce = -520,
@@ -26,7 +65,7 @@ Shapes.definitions = {
         color = {1.0, 0.3, 0.3},       -- red
         width = 52,
         height = 52,
-        life = 90,
+        life = 180,
         will = 110,
         speed = 390,                   -- 25% faster (was 310)
         jumpForce = -560,
@@ -55,7 +94,7 @@ Shapes.definitions = {
         color = {0.3, 1.0, 0.4},       -- green
         width = 48,
         height = 48,
-        life = 100,
+        life = 200,
         will = 100,
         speed = 350,                   -- 25% faster (was 280)
         jumpForce = -540,
@@ -72,7 +111,7 @@ Shapes.definitions = {
         color = {1.0, 0.8, 0.2},       -- yellow
         width = 64,
         height = 40,
-        life = 140,
+        life = 280,
         will = 60,
         speed = 275,                   -- 25% faster (was 220)
         jumpForce = -500,

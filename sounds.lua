@@ -103,6 +103,102 @@ function Sounds.load()
     end)
     sfx.lightning_warning:setVolume(0.35)
 
+    -- Saw warning: metallic grinding buildup
+    sfx.saw_warning = generateSound(1.0, sr, function(t, dur)
+        -- Envelope: starts quiet, builds to loud
+        local env = (t / dur) * (t / dur)  -- Quadratic rise
+        -- Metallic grinding frequencies
+        local baseFreq = 120 + t * 150
+        local grind = math.sin(2 * math.pi * baseFreq * t) * 0.25
+        -- Add metallic harmonics
+        local metal = math.sin(2 * math.pi * baseFreq * 3.3 * t) * 0.15
+        -- Rising whine
+        local whine = math.sin(2 * math.pi * (200 + t * 400) * t) * 0.15 * (t / dur)
+        -- Gritty noise
+        local noise = (math.random() * 2 - 1) * 0.15 * (t / dur)
+        return (grind + metal + whine + noise) * env * 0.7
+    end)
+    sfx.saw_warning:setVolume(0.35)
+
+    -- Saw spawn: heavy metallic thunk when saw drops
+    sfx.saw_spawn = generateSound(0.3, sr, function(t, dur)
+        local env = (1 - t / dur)
+        env = env * env
+        -- Low metallic thud
+        local freq = 100 - t * 50
+        local tone = math.sin(2 * math.pi * freq * t) * 0.5
+        -- Metallic clang
+        local clang = math.sin(2 * math.pi * 800 * t) * 0.3 * (1 - t / 0.1)
+        if t > 0.1 then clang = 0 end
+        return (tone + clang) * env
+    end)
+    sfx.saw_spawn:setVolume(0.4)
+
+    -- Saw bounce: impact sound when saw hits ground
+    sfx.saw_bounce = generateSound(0.2, sr, function(t, dur)
+        local env = (1 - t / dur)
+        env = env * env * env
+        -- Heavy metallic bounce
+        local freq = 150 - t * 100
+        local tone = math.sin(2 * math.pi * freq * t) * 0.6
+        -- Sharp click
+        local click = 0
+        if t < 0.02 then click = (1 - t / 0.02) * 0.5 end
+        -- Metallic ring
+        local ring = math.sin(2 * math.pi * 600 * t) * 0.2 * (1 - t / dur)
+        return (tone + click + ring) * env
+    end)
+    sfx.saw_bounce:setVolume(0.35)
+
+    -- Pacman spawn: organic creature spawn with warbling
+    sfx.pacman_spawn = generateSound(0.4, sr, function(t, dur)
+        local env = math.min(1, t / 0.05) * (1 - (t - 0.05) / (dur - 0.05))
+        -- Warbling creature sound with rising pitch
+        local baseFreq = 150 + t * 200
+        local warble = math.sin(2 * math.pi * 12 * t) * 30  -- Warble effect
+        local freq = baseFreq + warble
+        local tone = math.sin(2 * math.pi * freq * t) * 0.5
+        -- Add harmonic for richness
+        local harmonic = math.sin(2 * math.pi * freq * 1.5 * t) * 0.2
+        -- Organic noise
+        local noise = (math.random() * 2 - 1) * 0.15 * env
+        return (tone + harmonic + noise) * env
+    end)
+    sfx.pacman_spawn:setVolume(0.4)
+
+    -- Pacman bite: quick chomping sound
+    sfx.pacman_bite = generateSound(0.15, sr, function(t, dur)
+        local env = (1 - t / dur)
+        env = env * env * env
+        -- Sharp bite with descending pitch
+        local freq = 300 - t * 200
+        local tone = math.sin(2 * math.pi * freq * t) * 0.6
+        -- Click at start for bite impact
+        local click = 0
+        if t < 0.01 then click = (1 - t / 0.01) * 0.5 end
+        -- Small noise for texture
+        local noise = (math.random() * 2 - 1) * 0.2 * env
+        return (tone + click + noise) * env
+    end)
+    sfx.pacman_bite:setVolume(0.4)
+
+    -- Pacman death: organic creature death with descending warble
+    sfx.pacman_death = generateSound(0.5, sr, function(t, dur)
+        local env = (1 - t / dur)
+        env = env * env
+        -- Descending pitch with warble
+        local baseFreq = 200 - t * 150
+        local warble = math.sin(2 * math.pi * 8 * t) * 20 * (1 - t / dur)
+        local freq = baseFreq + warble
+        local tone = math.sin(2 * math.pi * freq * t) * 0.5
+        -- Harmonic for richness
+        local harmonic = math.sin(2 * math.pi * freq * 0.75 * t) * 0.25
+        -- Organic noise that fades
+        local noise = (math.random() * 2 - 1) * 0.2 * env
+        return (tone + harmonic + noise) * env
+    end)
+    sfx.pacman_death:setVolume(0.45)
+
     -- Dash whoosh: short rising pitch airy whoosh
     sfx.dash_whoosh = generateSound(0.15, sr, function(t, dur)
         local env = (1 - t / dur)
@@ -318,6 +414,13 @@ end
 function Sounds.playLightningWarning()
     if not sfx.lightning_warning then return end
     local s = sfx.lightning_warning:clone()
+    s:play()
+end
+
+-- Play the saw warning sound (1-second buildup before saw drops)
+function Sounds.playSawWarning()
+    if not sfx.saw_warning then return end
+    local s = sfx.saw_warning:clone()
     s:play()
 end
 

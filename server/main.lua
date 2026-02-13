@@ -90,7 +90,10 @@ local Abilities   = require("abilities")
 local Network     = require("network")
 local Lightning   = require("lightning")
 local Dropbox     = require("dropbox")
+local Saw         = require("saw")
+local Pacman      = require("pacman")
 local Sounds      = require("sounds")
+local Map         = require("map")
 
 -- Override port if specified
 if port ~= 27015 then
@@ -109,6 +112,10 @@ local countdownValue = 3
 local restartTimer = nil
 local networkSyncTimer = 0
 local TICK_RATE = Network.TICK_RATE
+-- Validate TICK_RATE to prevent infinite loops
+if not TICK_RATE or TICK_RATE <= 0 then
+    TICK_RATE = 1/30  -- Default to 30 ticks per second
+end
 local processNetworkMessages, sendGameState, startCountdown, checkGameOver, restartGame
 
 -- ─────────────────────────────────────────────
@@ -151,9 +158,6 @@ function initServer()
     return true
 end
 
--- Forward declarations
-local processNetworkMessages, sendGameState, checkGameOver, startCountdown
-
 -- ─────────────────────────────────────────────
 -- love.load
 -- ─────────────────────────────────────────────
@@ -186,14 +190,24 @@ function love.update(dt)
         if countdownTimer <= 0 then
             gameState = "playing"
             Lightning.reset()
+            Saw.reset()
+            Pacman.reset()
             log("FIGHT!")
         end
 
     elseif gameState == "playing" then
+        -- Update map (platform animation)
+        Map.update(dt)
+
         -- Update all players (will regen for remote players)
         for _, p in ipairs(players) do
             if p.life > 0 then
                 p:update(dt)
+                -- Apply fall damage (server is always authoritative)
+                local fallDamage = p:consumeFallDamage()
+                if fallDamage > 0 then
+                    p.life = p.life - fallDamage
+                end
             end
         end
 
@@ -215,10 +229,16 @@ function love.update(dt)
         -- Update dropboxes (host-authoritative)
         Dropbox.update(dt, players)
 
+        -- Update saws (host-authoritative)
+        Saw.update(dt, players)
+
+        -- Update pacman monsters (host-authoritative)
+        Pacman.update(dt, players)
+
         -- Network sync: broadcast all state
         networkSyncTimer = networkSyncTimer + dt
-        if networkSyncTimer >= TICK_RATE then
-            networkSyncTimer = 0
+        while networkSyncTimer >= TICK_RATE do
+            networkSyncTimer = networkSyncTimer - TICK_RATE
             sendGameState()
         end
 
@@ -226,14 +246,14 @@ function love.update(dt)
         checkGameOver()
 
     elseif gameState == "gameover" then
-	        -- Auto-restart after a delay (non-blocking)
-	        if restartTimer ~= nil then
-	            restartTimer = restartTimer - dt
-	            if restartTimer <= 0 then
-	                restartTimer = nil
-	                restartGame()
-	            end
-	        end
+        -- Auto-restart after a delay (non-blocking)
+        if restartTimer ~= nil then
+            restartTimer = restartTimer - dt
+            if restartTimer <= 0 then
+                restartTimer = nil
+                restartGame()
+            end
+        end
     end
 end
 
@@ -285,56 +305,83 @@ processNetworkMessages = function()
 
         elseif msg.type == "sel_browse" then
             local data = msg.data
-            if data and data.pid and data.idx then
-                selection:setRemoteChoice(data.pid, data.idx)
-                Network.relay(data.pid, "sel_browse", data, false)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and data.idx then
+                selection:setRemoteChoice(pid, data.idx)
+                if selection then
+                    selection:setConnected(pid, true)
+                end
+                data.pid = pid
+                Network.relay(pid, "sel_browse", data, false)
             end
 
         elseif msg.type == "sel_confirm" then
             local data = msg.data
-            if data and data.pid and data.idx then
-                selection:setRemoteConfirmed(data.pid, data.idx)
-                Network.relay(data.pid, "sel_confirm", data, true)
-                log("Player " .. data.pid .. " confirmed shape")
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and data.idx then
+                selection:setRemoteConfirmed(pid, data.idx)
+                if selection then
+                    selection:setConnected(pid, true)
+                end
+                data.pid = pid
+                Network.relay(pid, "sel_confirm", data, true)
+                log("Player " .. pid .. " confirmed shape")
             end
 
-        elseif msg.type == "client_state" then
-            local data = msg.data
-            if data and data.pid and players[data.pid] and players[data.pid].isRemote then
-                players[data.pid]:applyNetState({
+        elseif msg.type == "client_state_compact" then
+            local data = Network.decodeClientState(msg.raw)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] and players[pid].isRemote then
+                players[pid]:applyNetState({
                     x = data.x, y = data.y,
                     vx = data.vx, vy = data.vy,
-                    facingRight = (data.facing == 1)
+                    facingRight = (data.facing == 1),
+                    aimX = data.aimX,
+                    aimY = data.aimY,
+                    isDashing = (data.dash == 1),
+                    dashDir = data.dashDir
                 })
             end
 
         elseif msg.type == "player_jump" then
             local data = msg.data
-            if data and data.pid and players[data.pid] then
-                players[data.pid]:jump()
-                Network.relay(data.pid, "player_jump", data, true)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
+                players[pid]:jump()
+                data.pid = pid
+                Network.relay(pid, "player_jump", data, true)
             end
 
         elseif msg.type == "player_cast" then
             local data = msg.data
-            if data and data.pid and players[data.pid] then
-                players[data.pid]:castAbilityAtNearest(players)
-                Network.relay(data.pid, "player_cast", data, true)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
+                if data.tx and data.ty then
+                    players[pid]:castAbilityAt(data.tx, data.ty)
+                else
+                    players[pid]:castAbilityAtNearest(players)
+                end
+                data.pid = pid
+                Network.relay(pid, "player_cast", data, true)
             end
 
         elseif msg.type == "player_special" then
             local data = msg.data
-            if data and data.pid and players[data.pid] then
-                local p = players[data.pid]
-                Abilities.cast(p, p.shapeKey, p.facingRight)
-                Network.relay(data.pid, "player_special", data, true)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
+                local p = players[pid]
+                Abilities.cast(p, p.shapeKey, p.facingRight, data.tx, data.ty)
+                data.pid = pid
+                Network.relay(pid, "player_special", data, true)
             end
 
         elseif msg.type == "player_dash" then
             local data = msg.data
-            if data and data.pid and players[data.pid] then
-                players[data.pid]:dash(data.dir)
-                Network.relay(data.pid, "player_dash", data, true)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
+                players[pid]:dash(data.dir)
+                data.pid = pid
+                Network.relay(pid, "player_dash", data, true)
             end
 
         elseif msg.type == "player_name" then
@@ -346,6 +393,10 @@ processNetworkMessages = function()
                 -- Relay to other clients
                 Network.relay(data.pid, "player_name", data, true)
             end
+
+        elseif msg.type == "network_error" then
+            log("NETWORK ERROR: " .. tostring(msg.error or "unknown"))
+            love.event.quit(1)
         end
     end
 end
@@ -354,58 +405,103 @@ end
 -- Game state sync (host → clients)
 -- ─────────────────────────────────────────────
 sendGameState = function()
+    -- Collect player states (only alive players)
+    local playerStates = {}
     for i, p in ipairs(players) do
-        local state = p:getNetState()
-        Network.send("game_state", {
-            pid = i,
-            x = state.x, y = state.y,
-            vx = state.vx, vy = state.vy,
-            life = state.life, will = state.will,
-            facing = state.facingRight and 1 or 0,
-            armor = state.armor,
-            dmgBoost = state.damageBoost,
-            dmgShots = state.damageBoostShots
-        }, false)
+        if p.life > 0 then
+            local state = p:getNetState()
+            playerStates[#playerStates + 1] = {
+                pid = i,
+                x = state.x, y = state.y,
+                vx = state.vx, vy = state.vy,
+                life = state.life, will = state.will,
+                facing = state.facingRight and 1 or 0,
+                armor = state.armor,
+                dmgBoost = state.damageBoost,
+                dmgShots = state.damageBoostShots or 0,
+                aimX = state.aimX,
+                aimY = state.aimY,
+                dash = state.isDashing and 1 or 0,
+                dashDir = state.dashDir or 0
+            }
+        end
     end
 
-    -- Send lightning state
-    local lightningState = Lightning.getState()
-    local ldata = {
-        sc = #lightningState.strikes,
-        wc = #lightningState.warnings,
-        nt = lightningState.nextStrikeTimer
+    -- Collect lightning state
+    local ls = Lightning.getState()
+    local lightningData = {
+        sc = #ls.strikes, wc = #ls.warnings, nt = ls.nextStrikeTimer,
+        strikes = {}, warnings = {}
     }
-    for i, strike in ipairs(lightningState.strikes) do
-        ldata["s" .. i .. "x"] = strike.x
-        ldata["s" .. i .. "a"] = strike.age
+    for i, strike in ipairs(ls.strikes) do
+        lightningData.strikes[i] = {x = strike.x, age = strike.age}
     end
-    for i, warning in ipairs(lightningState.warnings) do
-        ldata["w" .. i .. "x"] = warning.x
-        ldata["w" .. i .. "a"] = warning.age
+    for i, warning in ipairs(ls.warnings) do
+        lightningData.warnings[i] = {x = warning.x, age = warning.age}
     end
-    Network.send("lightning_sync", ldata, false)
 
-    -- Send dropbox state
-    local dropboxState = Dropbox.getState()
-    local ddata = {
-        bc = #dropboxState.boxes,
-        cc = #dropboxState.charges,
-        st = dropboxState.spawnTimer
+    -- Collect dropbox state
+    local ds = Dropbox.getState()
+    local dropboxData = {
+        bc = #ds.boxes, cc = #ds.charges, st = ds.spawnTimer,
+        boxes = {}, charges = {}
     }
-    for i, box in ipairs(dropboxState.boxes) do
-        ddata["b" .. i .. "x"] = box.x
-        ddata["b" .. i .. "y"] = box.y
-        ddata["b" .. i .. "vx"] = box.vx
-        ddata["b" .. i .. "vy"] = box.vy
-        ddata["b" .. i .. "og"] = box.onGround and 1 or 0
+    for i, box in ipairs(ds.boxes) do
+        dropboxData.boxes[i] = {
+            x = box.x, y = box.y,
+            vx = box.vx, vy = box.vy,
+            og = box.onGround and 1 or 0
+        }
     end
-    for i, charge in ipairs(dropboxState.charges) do
-        ddata["c" .. i .. "x"] = charge.x
-        ddata["c" .. i .. "y"] = charge.y
-        ddata["c" .. i .. "a"] = charge.age
-        ddata["c" .. i .. "k"] = charge.kind or "health"
+    for i, charge in ipairs(ds.charges) do
+        dropboxData.charges[i] = {
+            x = charge.x, y = charge.y,
+            age = charge.age, kind = charge.kind or "health"
+        }
     end
-    Network.send("dropbox_sync", ddata, false)
+
+    -- Collect saw state
+    local ss = Saw.getState()
+    local sawData = {
+        sc = #(ss.saws or {}), wc = #(ss.warnings or {}),
+        nt = ss.nextSpawnTimer, idc = ss.sawIdCounter,
+        saws = {}, warnings = {}
+    }
+    for i, saw in ipairs(ss.saws or {}) do
+        sawData.saws[i] = {
+            id = saw.id, x = saw.x, y = saw.y,
+            vx = saw.vx, vy = saw.vy,
+            rotation = saw.rotation, age = saw.age,
+            onGround = saw.onGround and 1 or 0
+        }
+    end
+    for i, warning in ipairs(ss.warnings or {}) do
+        sawData.warnings[i] = {x = warning.x, age = warning.age}
+    end
+
+    -- Collect pacman state
+    local ps = Pacman.getState()
+    local pacmanData = {
+        mc = #(ps.monsters or {}),
+        nt = ps.nextSpawnTimer,
+        hs = ps.hasSpawnedOnce,
+        idc = ps.monsterIdCounter or 0,
+        monsters = {}
+    }
+    for i, monster in ipairs(ps.monsters or {}) do
+        pacmanData.monsters[i] = {
+            id = monster.id, x = monster.x, y = monster.y,
+            vx = monster.vx, vy = monster.vy or 0,
+            direction = monster.direction,
+            hp = monster.hp, age = monster.age,
+            mouthAngle = monster.mouthAngle,
+            onGround = monster.onGround and 1 or 0
+        }
+    end
+
+    -- Send everything in one compact message
+    local encoded = Network.encodeTick(playerStates, lightningData, dropboxData, sawData, pacmanData)
+    Network.sendRaw(encoded, false)
 end
 
 -- ─────────────────────────────────────────────
@@ -413,18 +509,27 @@ end
 -- ─────────────────────────────────────────────
 startCountdown = function()
     local choices = {selection:getChoices()}
-    for i = 1, maxPlayers do
-        players[i]:setShape(choices[i])
-    end
     Projectiles.clear()
     Abilities.clear()
     Dropbox.reset()
+    Saw.reset()
+    Pacman.reset()
 
     -- Find which players are connected/active
     local activePlayers = {}
     for i = 1, maxPlayers do
         if selection and selection.connected[i] then
             table.insert(activePlayers, i)
+        end
+    end
+
+    -- Only set shapes for active players; ensure inactive players are dead
+    for i = 1, maxPlayers do
+        if selection and selection.connected[i] then
+            players[i]:setShape(choices[i])
+        else
+            players[i].life = 0
+            players[i].shapeKey = choices[i]  -- still track for display
         end
     end
 
@@ -487,8 +592,8 @@ checkGameOver = function()
         end
         gameState = "gameover"
         Network.send("game_over", {winner = winner}, true)
-	        -- Auto-restart after 5 seconds (handled in love.update so we don't block networking)
-	        restartTimer = 5
+        -- Auto-restart after 5 seconds (handled in love.update so we don't block networking)
+        restartTimer = 5
     end
 end
 
@@ -502,21 +607,43 @@ restartGame = function()
     Abilities.clear()
     Lightning.reset()
     Dropbox.reset()
+    Saw.reset()
+    Pacman.reset()
     networkSyncTimer = 0
 
-    -- Reset players
+    -- Reset players but preserve names
+    local savedNames = {}
+    for i = 1, maxPlayers do
+        if players[i] and players[i].name then
+            savedNames[i] = players[i].name
+        end
+    end
     for i = 1, maxPlayers do
         players[i] = Player.new(i, nil)
         players[i].isRemote = true
+        if savedNames[i] then
+            players[i].name = savedNames[i]
+        end
     end
 
     selection = Selection.new(0, maxPlayers)
+
+    -- Re-mark all currently connected peers in the new selection
+    for pid, _ in pairs(Network.getConnectedPeers()) do
+        selection:setConnected(pid, true)
+    end
 
     local connected = Network.getConnectedCount() - 1
     if connected > 0 then
         gameState = "selection"
         Network.send("game_restart", {}, true)
-        log("Game restarted — back to selection")
+        for i = 1, maxPlayers do
+            Network.send("player_status", {
+                pid = i,
+                connected = selection.connected[i] == true
+            }, true)
+        end
+        log("Game restarted — back to selection (" .. connected .. " players)")
     else
         gameState = "waiting"
         log("No players connected — waiting...")
@@ -530,4 +657,3 @@ function love.quit()
     log("Server shutting down...")
     Network.stop()
 end
-

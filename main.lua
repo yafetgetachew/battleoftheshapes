@@ -13,8 +13,11 @@ local Lightning   = require("lightning")
 local Sounds      = require("sounds")
 local Config      = require("config")
 local Dropbox     = require("dropbox")
+local Saw         = require("saw")
+local Pacman      = require("pacman")
 local Background  = require("background")
 local Map         = require("map")
+local Shapes      = require("shapes")
 
 -- Game states: "splash", "menu", "settings", "connecting", "selection", "countdown", "playing", "gameover"
 -- (Note: "browsing" state was removed - use "Join by IP" instead)
@@ -72,7 +75,20 @@ local winner = nil
 -- Scaling and resolution
 local GAME_WIDTH = 1280
 local GAME_HEIGHT = 720
-local scaleX, scaleY, offsetX, offsetY = 1, 1, 0, 0
+-- Global scale factors (exported for other modules)
+GLOBAL_SCALE = 1
+GLOBAL_SCALE_X, GLOBAL_SCALE_Y = 1, 1
+local offsetX, offsetY = 0, 0
+
+-- Helper: Convert window coordinates to game coordinates
+local function windowToGame(x, y)
+    return (x - offsetX) / GLOBAL_SCALE, (y - offsetY) / GLOBAL_SCALE
+end
+
+-- Helper: Check if mouse is over a rectangle
+local function isMouseOver(mx, my, x, y, w, h)
+    return mx >= x and mx <= x + w and my >= y and my <= y + h
+end
 
 -- Fun font path (Fredoka One – bubbly rounded display font, OFL licensed)
 local FONT_PATH = "assets/fonts/FredokaOne-Regular.ttf"
@@ -80,12 +96,40 @@ local FONT_PATH = "assets/fonts/FredokaOne-Regular.ttf"
 -- Font cache: avoid allocating new Font objects every frame.
 local _fontCache = {}
 local function getFont(size)
-    local f = _fontCache[size]
+    -- Adjust size based on global scale for crisp text
+    local scaledSize = math.floor(size * GLOBAL_SCALE)
+    if scaledSize < 1 then scaledSize = 1 end
+    
+    local f = _fontCache[scaledSize]
     if not f then
-        f = love.graphics.newFont(FONT_PATH, size)
-        _fontCache[size] = f
+        f = love.graphics.newFont(FONT_PATH, scaledSize)
+        _fontCache[scaledSize] = f
     end
     return f
+end
+
+-- Clear font cache (call on resize)
+local function clearFontCache()
+    _fontCache = {}
+    -- Also clear other modules' font caches
+    Player.clearFontCache()
+    HUD.clearFontCache()
+    Selection.clearFontCache()
+    Dropbox.clearFontCache()
+end
+
+-- Helper to draw text with inverse scaling for sharpness
+-- Should be used for all UI text drawn under GLOBAL_SCALE
+function DrawSharpText(text, x, y, limit, align)
+    love.graphics.push()
+    love.graphics.translate(x, y)
+    love.graphics.scale(1/GLOBAL_SCALE, 1/GLOBAL_SCALE)
+    if limit then
+        love.graphics.printf(text, 0, 0, limit * GLOBAL_SCALE, align)
+    else
+        love.graphics.print(text, 0, 0)
+    end
+    love.graphics.pop()
 end
 
 -- ─────────────────────────────────────────────
@@ -235,7 +279,7 @@ local function updateDamageNumbers(dt)
     end
 end
 
--- Draw damage numbers (call in world space)
+-- Draw damage numbers (call in world space, inside camera transform)
 local function drawDamageNumbers()
     for _, dn in ipairs(damageNumbers) do
         local progress = dn.age / dn.maxAge
@@ -250,12 +294,29 @@ local function drawDamageNumbers()
             r, g, b = 1, 0.5, 0.2  -- Orange for medium
         end
 
-        love.graphics.setColor(0, 0, 0, alpha * 0.5)
-        love.graphics.setFont(getFont(math.floor(18 * scale)))
-        love.graphics.printf(tostring(dn.value), dn.x - 50 + 1, dn.y + 1, 100, "center")
+        local baseSize = 18 * scale
+        local font = getFont(baseSize)
 
+        -- Font is created at baseSize * GLOBAL_SCALE (via getFont).
+        -- We inverse-scale by 1/GLOBAL_SCALE so: large font * small scale = crisp text at intended size.
+        local offset = 50 * GLOBAL_SCALE
+        local width = 100 * GLOBAL_SCALE
+
+        love.graphics.push()
+        love.graphics.translate(dn.x, dn.y)
+        love.graphics.scale(1/GLOBAL_SCALE, 1/GLOBAL_SCALE)
+
+        love.graphics.setFont(font)
+
+        -- Shadow
+        love.graphics.setColor(0, 0, 0, alpha * 0.5)
+        love.graphics.printf(tostring(dn.value), -offset + 1, 1, width, "center")
+
+        -- Text
         love.graphics.setColor(r, g, b, alpha)
-        love.graphics.printf(tostring(dn.value), dn.x - 50, dn.y, 100, "center")
+        love.graphics.printf(tostring(dn.value), -offset, 0, width, "center")
+
+        love.graphics.pop()
     end
 end
 
@@ -300,14 +361,10 @@ function love.load()
         addHitPause(0.06)  -- Extra 60ms on kill
     end
 
-    -- Set up player damage callback for network damage numbers + juice
+    -- Network life deltas can arrive at high frequency (e.g. laser ticks).
+    -- Keep this lightweight to avoid multiplayer-wide hit-pause stalls.
     Player.onDamageReceived = function(x, y, damage)
         spawnDamageNumber(x, y, damage)
-        -- Add juice effects for clients (who don't get direct collision callbacks)
-        -- Use generic values that feel good for most hits
-        addHitPause(0.06)
-        addScreenShake(5, 0.2, 30)
-        Sounds.play("player_hurt") -- Ensure hurt sound plays if not already handled
     end
 
     -- Set up lightning hit callbacks for juice effects
@@ -317,6 +374,35 @@ function love.load()
     end
     Lightning.onWarningStart = function(x)
         Sounds.playLightningWarning()  -- Start warning sound ramp
+    end
+
+    -- Set up saw hit callbacks for juice effects
+    Saw.onHit = function(x, y, damage, playerId)
+        spawnDamageNumber(x, y, damage)
+        addScreenShake(3, 0.1, 15)  -- Small screen shake on saw hit
+    end
+    Saw.onWarningStart = function(x)
+        Sounds.playSawWarning()  -- Start saw warning sound
+    end
+    Saw.onSawSpawn = function(x)
+        Sounds.play("saw_spawn")
+    end
+    Saw.onBounce = function(x, y)
+        Sounds.play("saw_bounce")
+        addScreenShake(2, 0.05, 10)  -- Tiny shake on bounce
+    end
+
+    -- Set up pacman monster callbacks for juice effects
+    Pacman.onBite = function(x, y, damage, playerId)
+        spawnDamageNumber(x, y, damage)
+        addScreenShake(5, 0.15, 20)
+    end
+    Pacman.onKill = function(x, y, killerId)
+        addScreenShake(8, 0.3, 25)
+        addCameraZoom(1.03, 0.2)
+    end
+    Pacman.onSpawn = function()
+        addScreenShake(3, 0.2, 15)
     end
 
     -- Set up dash collision callbacks for juice effects
@@ -329,19 +415,24 @@ function love.load()
 end
 
 -- Update scaling factors for proper aspect ratio
+-- Update scaling factors for proper aspect ratio
 function updateScaling()
     local windowWidth, windowHeight = love.graphics.getDimensions()
-    scaleX = windowWidth / GAME_WIDTH
-    scaleY = windowHeight / GAME_HEIGHT
+    GLOBAL_SCALE_X = windowWidth / GAME_WIDTH
+    GLOBAL_SCALE_Y = windowHeight / GAME_HEIGHT
 
     -- Use uniform scaling to maintain aspect ratio
-    local scale = math.min(scaleX, scaleY)
-    scaleX = scale
-    scaleY = scale
+    local scale = math.min(GLOBAL_SCALE_X, GLOBAL_SCALE_Y)
+    GLOBAL_SCALE_X = scale
+    GLOBAL_SCALE_Y = scale
+    GLOBAL_SCALE = scale -- Export for other modules
 
     -- Calculate letterbox/pillarbox offsets
-    offsetX = (windowWidth - (GAME_WIDTH * scaleX)) / 2
-    offsetY = (windowHeight - (GAME_HEIGHT * scaleY)) / 2
+    offsetX = (windowWidth - (GAME_WIDTH * GLOBAL_SCALE)) / 2
+    offsetY = (windowHeight - (GAME_HEIGHT * GLOBAL_SCALE)) / 2
+    
+    -- Clear font caches as scale has changed
+    clearFontCache()
 end
 
 function love.resize(w, h)
@@ -417,8 +508,19 @@ function love.update(dt)
             gameState = "playing"
             Lightning.reset()
             Dropbox.reset()
+            Saw.reset()
+            Pacman.reset()
             Sounds.startMusic()  -- Start background music when gameplay begins
             Background.onMatchStart()  -- Moon glow pulse
+            -- Show speech bubbles for all players at match start
+            for _, p in ipairs(players) do
+                if p.shapeKey then
+                    local quote = Shapes.getRandomQuote(p.shapeKey)
+                    if quote then
+                        p:showSpeechBubble(quote, 3.0)  -- Show for 3 seconds
+                    end
+                end
+            end
         end
 
     elseif gameState == "playing" then
@@ -429,6 +531,9 @@ function love.update(dt)
             Network.update(dt)
             processNetworkMessages()
 
+            -- Update map (platform animation)
+            Map.update(dt)
+
             -- Update all players
             for _, p in ipairs(players) do
                 if p.life > 0 then
@@ -437,6 +542,16 @@ function love.update(dt)
                     if p:consumeLanding() then
                         Sounds.play("land")
                         Projectiles.spawnLandingDust(p.x, p.y + p.shapeHeight / 2)
+                    end
+                    -- Apply fall damage (host-authoritative)
+                    if Network.getRole() == Network.ROLE_HOST or Network.getRole() == Network.ROLE_NONE then
+                        local fallDamage = p:consumeFallDamage()
+                        if fallDamage > 0 then
+                            p.life = p.life - fallDamage
+                            spawnDamageNumber(p.x, p.y - p.shapeHeight/2, fallDamage)
+                            Sounds.play("hit")
+                            addScreenShake(2, 0.1, 10)
+                        end
                     end
                 end
             end
@@ -472,6 +587,22 @@ function love.update(dt)
             -- Update dropboxes
             Dropbox.update(dt, players)
 
+            -- Update saws (host-authoritative)
+            if Network.getRole() == Network.ROLE_HOST or Network.getRole() == Network.ROLE_NONE then
+                Saw.update(dt, players)
+            else
+                -- Clients just update visual state
+                Saw.update(dt, players)
+            end
+
+            -- Update pacman monsters (host-authoritative)
+            if Network.getRole() == Network.ROLE_HOST or Network.getRole() == Network.ROLE_NONE then
+                Pacman.update(dt, players)
+            else
+                -- Clients just update visual state
+                Pacman.update(dt, players)
+            end
+
             -- Check for player deaths (explosion effect)
             for _, p in ipairs(players) do
                 p:checkDeath(dt)
@@ -484,11 +615,12 @@ function love.update(dt)
                 end
             end
 
-            -- Network sync: host broadcasts all state, clients send their own state
+            -- Network sync: host broadcasts all state, clients send their own state.
+            -- Use realDt so sync keeps running during local hit-pause effects.
             if Network.getRole() ~= Network.ROLE_NONE then
-                networkSyncTimer = networkSyncTimer + dt
-                if networkSyncTimer >= Network.TICK_RATE then
-                    networkSyncTimer = 0
+                networkSyncTimer = networkSyncTimer + realDt
+                while networkSyncTimer >= Network.TICK_RATE do
+                    networkSyncTimer = networkSyncTimer - Network.TICK_RATE
                     if Network.getRole() == Network.ROLE_HOST then
                         sendGameState()
                     else
@@ -502,17 +634,13 @@ function love.update(dt)
             local localPlayer = getLocalPlayer()
             if localPlayer and localPlayer.life > 0 then
                  local mx, my = love.mouse.getPosition()
-                 local gameX = (mx - offsetX) / scaleX
-                 local gameY = (my - offsetY) / scaleY
+                 local gameX = (mx - offsetX) / GLOBAL_SCALE
+                 local gameY = (my - offsetY) / GLOBAL_SCALE
                  local W, H = GAME_WIDTH, GAME_HEIGHT
                  local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
                  local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
                  localPlayer.aimX = worldX
                  localPlayer.aimY = worldY
-                 -- DEBUG: Print aim coords periodically
-                 if math.random() < 0.01 then
-                     print("Main: Player " .. localPlayer.id .. " aim set to " .. math.floor(worldX) .. ", " .. math.floor(worldY))
-                 end
             end
 
             -- Check for game over (last player standing)
@@ -578,7 +706,7 @@ function love.draw()
     local shakeX, shakeY = getScreenShakeOffset()
 
     love.graphics.translate(offsetX + shakeX, offsetY + shakeY)
-    love.graphics.scale(scaleX, scaleY)
+    love.graphics.scale(GLOBAL_SCALE, GLOBAL_SCALE)
 
     local W = GAME_WIDTH
     local H = GAME_HEIGHT
@@ -597,7 +725,7 @@ function love.draw()
             -- Server mode overlay on selection screen
 	        love.graphics.setFont(getFont(16))
             love.graphics.setColor(1, 1, 0.4, 0.9)
-            love.graphics.printf("SERVER MODE — " .. menuStatus, 0, H - 40, W, "center")
+            DrawSharpText("SERVER MODE — " .. menuStatus, 0, H - 40, W, "center")
         end
     else
         -- ── Sky gradient ──
@@ -634,6 +762,12 @@ function love.draw()
         -- ── Dropboxes ──
         Dropbox.draw()
 
+        -- ── Saws ──
+        Saw.draw()
+
+        -- ── Pacman Monsters ──
+        Pacman.draw()
+
         -- ── Lightning (world elements only) ──
         Lightning.draw(W, H)
 
@@ -648,7 +782,7 @@ function love.draw()
         Background.drawForeground(W, H, parallaxOffset)
 
         -- ── HUD (not affected by camera) ──
-        HUD.draw(players, W)
+        HUD.draw(players, W, H, Network.getLocalPlayerId())
 
         -- ── Countdown overlay ──
         if gameState == "countdown" then
@@ -773,8 +907,8 @@ function love.keypressed(key)
                 -- Actually easier: World = (Screen - Center) / Zoom + Center + Camera - Offset
                 
                 -- Step 1: Undo letterboxing/scaling
-                local gameX = (mx - offsetX) / scaleX
-                local gameY = (my - offsetY) / scaleY
+                local gameX = (mx - offsetX) / GLOBAL_SCALE
+                local gameY = (my - offsetY) / GLOBAL_SCALE
                 
                 -- Step 2: Undo camera zoom/pan
                 local W, H = GAME_WIDTH, GAME_HEIGHT
@@ -790,8 +924,8 @@ function love.keypressed(key)
             if key == localPlayer.controls.special then
                 -- Mouse aiming for special ability
                 local mx, my = love.mouse.getPosition()
-                local gameX = (mx - offsetX) / scaleX
-                local gameY = (my - offsetY) / scaleY
+                local gameX = (mx - offsetX) / GLOBAL_SCALE
+                local gameY = (my - offsetY) / GLOBAL_SCALE
                 local W, H = GAME_WIDTH, GAME_HEIGHT
                 local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
                 local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
@@ -837,9 +971,6 @@ end
 -- ─────────────────────────────────────────────
 function startCountdown()
     local choices = {selection:getChoices()}
-    for i = 1, maxPlayers do
-        players[i]:setShape(choices[i])
-    end
     Projectiles.clear()
     Abilities.clear()
 
@@ -851,6 +982,18 @@ function startCountdown()
         elseif demoMode then
             -- In demo mode, all created players are active
             table.insert(activePlayers, i)
+        end
+    end
+
+    -- Only set shapes for active players; ensure inactive players are dead
+    for i = 1, maxPlayers do
+        if selection and selection.connected[i] then
+            players[i]:setShape(choices[i])
+        elseif demoMode then
+            players[i]:setShape(choices[i])
+        else
+            players[i].life = 0
+            players[i].shapeKey = choices[i]  -- still track for display
         end
     end
 
@@ -942,7 +1085,7 @@ function drawCountdown(W, H)
     love.graphics.setColor(1, 1, 1, 0.9)
 
     local text = countdownValue > 0 and tostring(countdownValue) or "FIGHT!"
-    love.graphics.printf(text, 0, H / 2 - 50, W, "center")
+    DrawSharpText(text, 0, H / 2 - 50, W, "center")
 end
 
 function drawControlsHint(W, H)
@@ -950,7 +1093,10 @@ function drawControlsHint(W, H)
     love.graphics.setColor(1, 1, 1, 0.25)
     local pid = Network.getLocalPlayerId()
     local hint = "P" .. pid .. ": A/D move (double-tap dash) · Space jump · W cast · E special    |    ESC menu"
-    love.graphics.printf(hint, 0, H - 22, W, "center")
+    if Config.getControlScheme() == "arrows" then
+        hint = "Controls: Arrows to Move • Enter to Jump • Mouse to Aim/Shoot"
+    end
+    DrawSharpText(hint, 0, H - 22, W, "center")
 end
 
 function drawServerHint(W, H)
@@ -958,14 +1104,14 @@ function drawServerHint(W, H)
     love.graphics.setColor(1, 1, 0.4, 0.35)
     local connected = Network.getConnectedCount() - 1  -- subtract host itself
     local hint = "SERVER MODE — " .. connected .. "/" .. maxPlayers .. " players    |    ESC menu"
-    love.graphics.printf(hint, 0, H - 22, W, "center")
+    DrawSharpText(hint, 0, H - 22, W, "center")
 end
 
 function drawDemoHint(W, H)
 	love.graphics.setFont(getFont(11))
     love.graphics.setColor(0.4, 1, 0.6, 0.35)
     local hint = "DEMO MODE — P1: A/D move (double-tap dash) · Space jump · W cast · E special    |    ESC menu"
-    love.graphics.printf(hint, 0, H - 22, W, "center")
+    DrawSharpText(hint, 0, H - 22, W, "center")
 end
 
 -- ─────────────────────────────────────────────
@@ -979,17 +1125,17 @@ function drawSplash(W, H)
     local pulse = 0.7 + 0.3 * math.sin(splashTimer * 2.5)
     love.graphics.setFont(getFont(64))
     love.graphics.setColor(1.0, 0.85, 0.2, pulse)
-    love.graphics.printf("BATTLE OF THE SHAPES", 0, H / 2 - 80, W, "center")
+    DrawSharpText("BATTLE OF THE SHAPES", 0, H / 2 - 80, W, "center")
 
     love.graphics.setFont(getFont(28))
     love.graphics.setColor(0.7, 0.7, 0.9, pulse * 0.8)
-    love.graphics.printf("B.O.T.S", 0, H / 2 + 10, W, "center")
+    DrawSharpText("B.O.T.S", 0, H / 2 + 10, W, "center")
 
     if splashTimer > 1.0 then
         love.graphics.setFont(getFont(18))
         local blink = 0.4 + 0.6 * math.sin(splashTimer * 4)
         love.graphics.setColor(1, 1, 1, blink)
-        love.graphics.printf("Press any key to continue", 0, H / 2 + 80, W, "center")
+        DrawSharpText("Press any key to continue", 0, H / 2 + 80, W, "center")
     end
 end
 
@@ -1030,7 +1176,7 @@ function drawMenu(W, H)
 
 	love.graphics.setFont(getFont(42))
     love.graphics.setColor(1.0, 0.85, 0.2)
-    love.graphics.printf("B.O.T.S", 0, 80, W, "center")
+    DrawSharpText("B.O.T.S", 0, 80, W, "center")
 
 	love.graphics.setFont(getFont(18))
     love.graphics.setColor(0.7, 0.7, 0.9)
@@ -1039,7 +1185,7 @@ function drawMenu(W, H)
     if Config.getServerMode() then
         subtitle = subtitle .. " (Server Mode)"
     end
-    love.graphics.printf(subtitle, 0, 140, W, "center")
+    DrawSharpText(subtitle, 0, 140, W, "center")
 
 	love.graphics.setFont(getFont(28))
     local menuY = 240
@@ -1048,10 +1194,10 @@ function drawMenu(W, H)
     for i, opt in ipairs(options) do
         if i == menuChoice then
             love.graphics.setColor(1.0, 1.0, 0.4)
-            love.graphics.printf("> " .. opt .. " <", 0, menuY + (i - 1) * 50, W, "center")
+            DrawSharpText("> " .. opt .. " <", 0, menuY + (i - 1) * 50, W, "center")
         else
             love.graphics.setColor(0.6, 0.6, 0.6)
-            love.graphics.printf(opt, 0, menuY + (i - 1) * 50, W, "center")
+            DrawSharpText(opt, 0, menuY + (i - 1) * 50, W, "center")
         end
     end
 
@@ -1059,11 +1205,11 @@ function drawMenu(W, H)
 	-- Show status/errors on the menu (e.g. host bind failures, disconnect messages).
 	if menuStatus and #menuStatus > 0 then
 		love.graphics.setColor(1.0, 0.45, 0.45)
-		love.graphics.printf(menuStatus, 0, H - 90, W, "center")
+		DrawSharpText(menuStatus, 0, H - 90, W, "center")
 	end
 
 	love.graphics.setColor(0.5, 0.5, 0.5)
-	love.graphics.printf("Use ↑/↓ to select, Enter to confirm", 0, H - 60, W, "center")
+	DrawSharpText("Use ↑/↓ to select, Enter to confirm", 0, H - 60, W, "center")
 end
 
 -- ─────────────────────────────────────────────
@@ -1174,7 +1320,7 @@ function drawSettings(W, H)
     -- Title
     love.graphics.setFont(getFont(32))
     love.graphics.setColor(1.0, 0.85, 0.2)
-    love.graphics.printf("Settings", 0, 40, W, "center")
+    DrawSharpText("Settings", 0, 40, W, "center")
 
     -- Grid layout: 2 columns x 4 rows
     local labelFont = getFont(14)
@@ -1204,7 +1350,7 @@ function drawSettings(W, H)
         -- Label
         love.graphics.setFont(labelFont)
         love.graphics.setColor(isSelected and {1.0, 1.0, 0.4} or {0.6, 0.6, 0.6})
-        love.graphics.printf(label, x, y, colWidth, "center")
+        DrawSharpText(label, x, y, colWidth, "center")
 
         -- Value
         love.graphics.setFont(valueFont)
@@ -1219,13 +1365,13 @@ function drawSettings(W, H)
         end
 
         local displayValue = isEditing and (value .. "_") or ("◀ " .. value .. " ▶")
-        love.graphics.printf(displayValue, x, y + 20, colWidth, "center")
+        DrawSharpText(displayValue, x, y + 20, colWidth, "center")
 
         -- Detail (smaller, below value)
         if detail then
             love.graphics.setFont(getFont(11))
             love.graphics.setColor(0.45, 0.45, 0.5)
-            love.graphics.printf(detail, x, y + 44, colWidth, "center")
+            DrawSharpText(detail, x, y + 44, colWidth, "center")
         end
     end
 
@@ -1272,7 +1418,7 @@ function drawSettings(W, H)
     local instructions = settingsEditingName
         and "Type name • Enter to save • Esc to cancel"
         or "↑/↓/←/→ navigate  •  Space change  •  Esc back"
-    love.graphics.printf(instructions, 0, H - 50, W, "center")
+    DrawSharpText(instructions, 0, H - 50, W, "center")
 end
 
 function drawConnecting(W, H)
@@ -1281,13 +1427,13 @@ function drawConnecting(W, H)
 
     love.graphics.setFont(getFont(20))
     love.graphics.setColor(1, 1, 1)
-    love.graphics.printf(menuStatus, 0, 80, W, "center")
+    DrawSharpText(menuStatus, 0, 80, W, "center")
 
     -- IP input area
     local inputY = 140
     love.graphics.setFont(getFont(16))
     love.graphics.setColor(0.6, 0.6, 0.6)
-    love.graphics.printf("Enter IP address:", 0, inputY, W, "center")
+    DrawSharpText("Enter IP address:", 0, inputY, W, "center")
 
     love.graphics.setFont(getFont(28))
     if ipHistoryIndex == 0 then
@@ -1297,7 +1443,7 @@ function drawConnecting(W, H)
     end
     local display = joinAddress
     if #display == 0 then display = "_" end
-    love.graphics.printf(display, 0, inputY + 30, W, "center")
+    DrawSharpText(display, 0, inputY + 30, W, "center")
 
     -- IP History
     local history = Config.getIPHistory()
@@ -1305,7 +1451,7 @@ function drawConnecting(W, H)
         local historyY = inputY + 90
         love.graphics.setFont(getFont(16))
         love.graphics.setColor(0.6, 0.6, 0.6)
-        love.graphics.printf("Recent connections (↑/↓ to select):", 0, historyY, W, "center")
+        DrawSharpText("Recent connections (↑/↓ to select):", 0, historyY, W, "center")
 
         love.graphics.setFont(getFont(22))
         local maxDisplay = math.min(#history, 5)  -- Show max 5 entries
@@ -1313,22 +1459,22 @@ function drawConnecting(W, H)
             local y = historyY + 30 + (i - 1) * 35
             if i == ipHistoryIndex then
                 love.graphics.setColor(1.0, 1.0, 0.4)
-                love.graphics.printf("> " .. history[i] .. " <", 0, y, W, "center")
+                DrawSharpText("> " .. history[i] .. " <", 0, y, W, "center")
             else
                 love.graphics.setColor(0.7, 0.7, 0.7)
-                love.graphics.printf(history[i], 0, y, W, "center")
+                DrawSharpText(history[i], 0, y, W, "center")
             end
         end
         if #history > maxDisplay then
             love.graphics.setFont(getFont(14))
             love.graphics.setColor(0.5, 0.5, 0.5)
-            love.graphics.printf("... and " .. (#history - maxDisplay) .. " more", 0, historyY + 30 + maxDisplay * 35, W, "center")
+            DrawSharpText("... and " .. (#history - maxDisplay) .. " more", 0, historyY + 30 + maxDisplay * 35, W, "center")
         end
     end
 
     love.graphics.setFont(getFont(14))
     love.graphics.setColor(0.5, 0.5, 0.5)
-    love.graphics.printf("Enter to connect  •  Backspace to go back", 0, H - 40, W, "center")
+    DrawSharpText("Enter to connect  •  Backspace to go back", 0, H - 40, W, "center")
 end
 
 
@@ -1546,25 +1692,45 @@ function processNetworkMessages()
             Sounds.stopMusic()
             Sounds.startMenuMusic()
 
+        elseif msg.type == "network_error" then
+            local errText = tostring(msg.error or "unknown")
+            print("Network error: " .. errText)
+            if msg.previousRole == Network.ROLE_HOST then
+                menuStatus = "Network host error: " .. errText
+                gameState = "menu"
+                Sounds.stopMusic()
+                Sounds.startMenuMusic()
+            end
+
         elseif msg.type == "sel_browse" then
             -- Remote player is browsing shapes
             local data = msg.data
-            if data and data.pid and data.idx then
-                selection:setRemoteChoice(data.pid, data.idx)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and data.idx then
+                selection:setRemoteChoice(pid, data.idx)
+                if selection and Network.getRole() == Network.ROLE_HOST then
+                    selection:setConnected(pid, true)
+                end
                 -- Host relays to other clients
                 if Network.getRole() == Network.ROLE_HOST then
-                    Network.relay(data.pid, "sel_browse", data, false)
+                    data.pid = pid
+                    Network.relay(pid, "sel_browse", data, false)
                 end
             end
 
         elseif msg.type == "sel_confirm" then
             -- Remote player confirmed their shape
             local data = msg.data
-            if data and data.pid and data.idx then
-                selection:setRemoteConfirmed(data.pid, data.idx)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and data.idx then
+                selection:setRemoteConfirmed(pid, data.idx)
+                if selection and Network.getRole() == Network.ROLE_HOST then
+                    selection:setConnected(pid, true)
+                end
                 -- Host relays to other clients
                 if Network.getRole() == Network.ROLE_HOST then
-                    Network.relay(data.pid, "sel_confirm", data, true)
+                    data.pid = pid
+                    Network.relay(pid, "sel_confirm", data, true)
                 end
             end
 
@@ -1594,9 +1760,6 @@ function processNetworkMessages()
             -- Client received countdown start from host
             local data = msg.data
             if data then
-                for i = 1, maxPlayers do
-                    players[i]:setShape(data["s" .. i])
-                end
                 Projectiles.clear()
                 Abilities.clear()
 
@@ -1617,6 +1780,22 @@ function processNetworkMessages()
                         if selection and selection.connected[i] then
                             table.insert(activePlayers, i)
                         end
+                    end
+                end
+
+                -- Build lookup for active players
+                local isActive = {}
+                for _, pid in ipairs(activePlayers) do
+                    isActive[pid] = true
+                end
+
+                -- Only set shapes for active players; ensure inactive players are dead
+                for i = 1, maxPlayers do
+                    if isActive[i] then
+                        players[i]:setShape(data["s" .. i])
+                    else
+                        players[i].life = 0
+                        players[i].shapeKey = data["s" .. i]
                     end
                 end
 
@@ -1647,22 +1826,75 @@ function processNetworkMessages()
                 initCamera(players)
             end
 
-        elseif msg.type == "game_state" then
-            -- Client receives authoritative game state from host
-            local data = msg.data
-            if data then
-                applyGameState(data)
+        elseif msg.type == "tick" then
+            -- Client receives compact batched game state from host
+            if Network.getRole() == Network.ROLE_CLIENT then
+                local playerStates, lightningData, dropboxData, sawData, pacmanData = Network.decodeTick(msg.raw)
+                -- Apply player states
+                for _, ps in ipairs(playerStates) do
+                    applyGameState(ps)
+                end
+                -- Apply lightning state
+                if lightningData and lightningData.sc ~= nil then
+                    local prevState = Lightning.getState()
+                    local prevStrikes = prevState and prevState.strikes or {}
+                    local strikes = {}
+                    for i, s in ipairs(lightningData.strikes or {}) do
+                        local prev = prevStrikes[i]
+                        local segments = (prev and prev.x == s.x and prev.segments) or Lightning.generateBoltSegments(s.x)
+                        strikes[i] = {
+                            x = s.x,
+                            age = s.age,
+                            segments = segments
+                        }
+                    end
+                    Lightning.setState({
+                        strikes = strikes,
+                        warnings = lightningData.warnings or {},
+                        nextStrikeTimer = lightningData.nt or 5
+                    })
+                end
+                -- Apply dropbox state
+                if dropboxData and dropboxData.bc ~= nil then
+                    Dropbox.setState({
+                        boxes = dropboxData.boxes or {},
+                        charges = dropboxData.charges or {},
+                        spawnTimer = dropboxData.st or 10
+                    })
+                end
+                -- Apply saw state
+                if sawData and sawData.sc ~= nil then
+                    Saw.setState({
+                        saws = sawData.saws or {},
+                        warnings = sawData.warnings or {},
+                        nextSpawnTimer = sawData.nt or 8,
+                        sawIdCounter = sawData.sawIdCounter or 0
+                    })
+                end
+                -- Apply pacman state
+                if pacmanData and pacmanData.mc ~= nil then
+                    Pacman.setState({
+                        monsters = pacmanData.monsters or {},
+                        nextSpawnTimer = pacmanData.nt or 30,
+                        hasSpawnedOnce = pacmanData.hasSpawnedOnce or false
+                    })
+                end
             end
 
-        elseif msg.type == "client_state" then
-            -- Host receives a client's player state
+        elseif msg.type == "client_state_compact" then
+            -- Host receives compact client state
             if Network.getRole() == Network.ROLE_HOST then
-                local data = msg.data
-                if data and data.pid and players[data.pid] and players[data.pid].isRemote then
-                    players[data.pid]:applyNetState({
+                local data = Network.decodeClientState(msg.raw)
+                local pid = msg.fromPlayerId or (data and data.pid)
+                if data and pid and players[pid] and players[pid].isRemote then
+                    players[pid]:applyNetState({
                         x = data.x, y = data.y,
                         vx = data.vx, vy = data.vy,
-                        facingRight = (data.facing == 1)
+                        facingRight = (data.facing == 1),
+                        aimX = data.aimX,
+                        aimY = data.aimY,
+                        isDashing = (data.dash == 1),
+                        dashDir = data.dashDir
                     })
                 end
             end
@@ -1670,48 +1902,56 @@ function processNetworkMessages()
         elseif msg.type == "player_jump" then
             -- Remote player jumped
             local data = msg.data
-            if data and data.pid and players[data.pid] then
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
                 Sounds.play("jump")
-                players[data.pid]:jump()
+                players[pid]:jump()
+                data.pid = pid
                 -- Host relays to other clients
                 if Network.getRole() == Network.ROLE_HOST then
-                    Network.relay(data.pid, "player_jump", data, true)
+                    Network.relay(pid, "player_jump", data, true)
                 end
             end
 
         elseif msg.type == "player_cast" then
             -- Remote player cast ability
             local data = msg.data
-            if data and data.pid and players[data.pid] then
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
                 if data.tx and data.ty then
-                    players[data.pid]:castAbilityAt(data.tx, data.ty)
+                    players[pid]:castAbilityAt(data.tx, data.ty)
                 else
-                    players[data.pid]:castAbilityAtNearest(players)
+                    players[pid]:castAbilityAtNearest(players)
                 end
+                data.pid = pid
                 if Network.getRole() == Network.ROLE_HOST then
-                    Network.relay(data.pid, "player_cast", data, true)
+                    Network.relay(pid, "player_cast", data, true)
                 end
             end
 
         elseif msg.type == "player_special" then
             -- Remote player used special ability
             local data = msg.data
-            if data and data.pid and players[data.pid] then
-                local p = players[data.pid]
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
+                local p = players[pid]
                 Abilities.cast(p, p.shapeKey, p.facingRight, data.tx, data.ty)
+                data.pid = pid
                 if Network.getRole() == Network.ROLE_HOST then
-                    Network.relay(data.pid, "player_special", data, true)
+                    Network.relay(pid, "player_special", data, true)
                 end
             end
 
         elseif msg.type == "player_dash" then
             -- Remote player dashed
             local data = msg.data
-            if data and data.pid and players[data.pid] then
-                players[data.pid]:dash(data.dir)
+            local pid = msg.fromPlayerId or (data and data.pid)
+            if data and pid and players[pid] then
+                players[pid]:dash(data.dir)
                 Sounds.play("dash_whoosh")
+                data.pid = pid
                 if Network.getRole() == Network.ROLE_HOST then
-                    Network.relay(data.pid, "player_dash", data, true)
+                    Network.relay(pid, "player_dash", data, true)
                 end
             end
 
@@ -1731,88 +1971,44 @@ function processNetworkMessages()
             Abilities.clear()
             Lightning.reset()
             Dropbox.reset()
+            Saw.reset()
+            Pacman.reset()
+            local prevConnected = selection and selection.connected or nil
+            -- Preserve player names
+            local savedNames = {}
+            for i = 1, maxPlayers do
+                if players[i] and players[i].name then
+                    savedNames[i] = players[i].name
+                end
+            end
+            for i = 1, maxPlayers do
+                if players[i] then
+                    players[i]:setShape(nil)
+                    players[i].life = 0
+                    if savedNames[i] then
+                        players[i].name = savedNames[i]
+                    end
+                end
+            end
             selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
+            if prevConnected then
+                for i = 1, maxPlayers do
+                    if prevConnected[i] then
+                        selection:setConnected(i, true)
+                    end
+                end
+            end
+            local localPid = Network.getLocalPlayerId()
+            if localPid and localPid >= 1 and localPid <= maxPlayers then
+                selection:setConnected(localPid, true)
+            end
+            networkSyncTimer = 0
             gameState = "selection"
 
-        elseif msg.type == "lightning_sync" then
-            -- Client receives consolidated lightning state from host
-            if Network.getRole() == Network.ROLE_CLIENT then
-                local data = msg.data
-                if data then
-                    local strikes = {}
-                    local warnings = {}
-                    local sc = data.sc or 0
-                    local wc = data.wc or 0
-                    for i = 1, sc do
-                        local sx = data["s" .. i .. "x"]
-                        local sa = data["s" .. i .. "a"]
-                        if sx then
-                            strikes[i] = {
-                                x = sx,
-                                age = sa or 0,
-                                segments = Lightning.generateBoltSegments(sx)
-                            }
-                        end
-                    end
-                    for i = 1, wc do
-                        local wx = data["w" .. i .. "x"]
-                        local wa = data["w" .. i .. "a"]
-                        if wx then
-                            warnings[i] = {
-                                x = wx,
-                                age = wa or 0
-                            }
-                        end
-                    end
-                    Lightning.setState({
-                        strikes = strikes,
-                        warnings = warnings,
-                        nextStrikeTimer = data.nt or 5
-                    })
-                end
-            end
-
-        elseif msg.type == "dropbox_sync" then
-            -- Client receives dropbox state from host
-            if Network.getRole() == Network.ROLE_CLIENT then
-                local data = msg.data
-                if data then
-                    local newBoxes = {}
-                    local newCharges = {}
-                    local bc = data.bc or 0
-                    local cc = data.cc or 0
-                    for i = 1, bc do
-                        local bx = data["b" .. i .. "x"]
-                        local by = data["b" .. i .. "y"]
-                        if bx and by then
-                            newBoxes[i] = {
-                                x = bx,
-                                y = by,
-                                vx = data["b" .. i .. "vx"] or 0,
-                                vy = data["b" .. i .. "vy"] or 0,
-                                onGround = (data["b" .. i .. "og"] or 0) == 1
-                            }
-                        end
-                    end
-                    for i = 1, cc do
-                        local cx = data["c" .. i .. "x"]
-                        local cy = data["c" .. i .. "y"]
-                        if cx and cy then
-                            newCharges[i] = {
-                                x = cx,
-                                y = cy,
-                                age = data["c" .. i .. "a"] or 0,
-                                kind = data["c" .. i .. "k"] or "health"
-                            }
-                        end
-                    end
-                    Dropbox.setState({
-                        boxes = newBoxes,
-                        charges = newCharges,
-                        spawnTimer = data.st or 10
-                    })
-                end
-            end
+        elseif msg.type == "game_state" then
+            -- Legacy: individual player state (backward compat)
+            local data = msg.data
+            if data then applyGameState(data) end
         end
     end
 end
@@ -1821,74 +2017,119 @@ end
 -- Game state sync (host → clients)
 -- ─────────────────────────────────────────────
 function sendGameState()
+    -- Collect player states (only alive players)
+    local playerStates = {}
     for i, p in ipairs(players) do
-        local state = p:getNetState()
-        Network.send("game_state", {
-            pid = i,
-            x = state.x, y = state.y,
-            vx = state.vx, vy = state.vy,
-            life = state.life, will = state.will,
-            facing = state.facingRight and 1 or 0,
-            armor = state.armor,
-            dmgBoost = state.damageBoost,
-            dmgShots = state.damageBoostShots
-        }, false)
+        if p.life > 0 then
+            local state = p:getNetState()
+            playerStates[#playerStates + 1] = {
+                pid = i,
+                x = state.x, y = state.y,
+                vx = state.vx, vy = state.vy,
+                life = state.life, will = state.will,
+                facing = state.facingRight and 1 or 0,
+                armor = state.armor,
+                dmgBoost = state.damageBoost,
+                dmgShots = state.damageBoostShots or 0,
+                aimX = state.aimX,
+                aimY = state.aimY,
+                dash = state.isDashing and 1 or 0,
+                dashDir = state.dashDir or 0
+            }
+        end
     end
 
-    -- Send lightning state to clients (single consolidated message)
-    local lightningState = Lightning.getState()
-    local ldata = {
-        sc = #lightningState.strikes,
-        wc = #lightningState.warnings,
-        nt = lightningState.nextStrikeTimer
+    -- Collect lightning state
+    local ls = Lightning.getState()
+    local lightningData = {
+        sc = #ls.strikes, wc = #ls.warnings, nt = ls.nextStrikeTimer,
+        strikes = {}, warnings = {}
     }
-    for i, strike in ipairs(lightningState.strikes) do
-        ldata["s" .. i .. "x"] = strike.x
-        ldata["s" .. i .. "a"] = strike.age
+    for i, strike in ipairs(ls.strikes) do
+        lightningData.strikes[i] = {x = strike.x, age = strike.age}
     end
-    for i, warning in ipairs(lightningState.warnings) do
-        ldata["w" .. i .. "x"] = warning.x
-        ldata["w" .. i .. "a"] = warning.age
+    for i, warning in ipairs(ls.warnings) do
+        lightningData.warnings[i] = {x = warning.x, age = warning.age}
     end
-    Network.send("lightning_sync", ldata, false)
 
-    -- Send dropbox state to clients (single consolidated message)
-    local dropboxState = Dropbox.getState()
-    local ddata = {
-        bc = #dropboxState.boxes,
-        cc = #dropboxState.charges,
-        st = dropboxState.spawnTimer
+    -- Collect dropbox state
+    local ds = Dropbox.getState()
+    local dropboxData = {
+        bc = #ds.boxes, cc = #ds.charges, st = ds.spawnTimer,
+        boxes = {}, charges = {}
     }
-    for i, box in ipairs(dropboxState.boxes) do
-        ddata["b" .. i .. "x"] = box.x
-        ddata["b" .. i .. "y"] = box.y
-        ddata["b" .. i .. "vx"] = box.vx
-        ddata["b" .. i .. "vy"] = box.vy
-        ddata["b" .. i .. "og"] = box.onGround and 1 or 0
+    for i, box in ipairs(ds.boxes) do
+        dropboxData.boxes[i] = {
+            x = box.x, y = box.y,
+            vx = box.vx, vy = box.vy,
+            og = box.onGround and 1 or 0
+        }
     end
-    for i, charge in ipairs(dropboxState.charges) do
-        ddata["c" .. i .. "x"] = charge.x
-        ddata["c" .. i .. "y"] = charge.y
-        ddata["c" .. i .. "a"] = charge.age
-        ddata["c" .. i .. "k"] = charge.kind or "health"
+    for i, charge in ipairs(ds.charges) do
+        dropboxData.charges[i] = {
+            x = charge.x, y = charge.y,
+            age = charge.age, kind = charge.kind or "health"
+        }
     end
-    Network.send("dropbox_sync", ddata, false)
+
+    -- Collect saw state
+    local ss = Saw.getState()
+    local sawData = {
+        sc = #(ss.saws or {}), wc = #(ss.warnings or {}),
+        nt = ss.nextSpawnTimer, idc = ss.sawIdCounter,
+        saws = {}, warnings = {}
+    }
+    for i, saw in ipairs(ss.saws or {}) do
+        sawData.saws[i] = {
+            id = saw.id, x = saw.x, y = saw.y,
+            vx = saw.vx, vy = saw.vy,
+            rotation = saw.rotation, age = saw.age,
+            onGround = saw.onGround and 1 or 0
+        }
+    end
+    for i, warning in ipairs(ss.warnings or {}) do
+        sawData.warnings[i] = {x = warning.x, age = warning.age}
+    end
+
+    -- Collect pacman state
+    local ps = Pacman.getState()
+    local pacmanData = {
+        mc = #(ps.monsters or {}),
+        nt = ps.nextSpawnTimer,
+        hs = ps.hasSpawnedOnce,
+        idc = ps.monsterIdCounter or 0,
+        monsters = {}
+    }
+    for i, monster in ipairs(ps.monsters or {}) do
+        pacmanData.monsters[i] = {
+            id = monster.id, x = monster.x, y = monster.y,
+            vx = monster.vx, vy = monster.vy or 0,
+            direction = monster.direction,
+            hp = monster.hp, age = monster.age,
+            mouthAngle = monster.mouthAngle,
+            onGround = monster.onGround and 1 or 0
+        }
+    end
+
+    -- Send everything in one compact message
+    local encoded = Network.encodeTick(playerStates, lightningData, dropboxData, sawData, pacmanData)
+    Network.sendRaw(encoded, false)
 end
 
--- Client sends its own player state to the host
+-- Client sends its own player state to the host (compact)
 function sendClientState()
     local pid = Network.getLocalPlayerId()
     local p = players[pid]
     if not p then return end
     local state = p:getNetState()
-    -- Client only sends position/velocity/facing; host is authoritative for
-    -- life, will, armor, and damage boost.
-    Network.send("client_state", {
-        pid = pid,
-        x = state.x, y = state.y,
-        vx = state.vx, vy = state.vy,
-        facing = state.facingRight and 1 or 0
-    }, false)
+    local encoded = Network.encodeClientState(
+        pid, state.x, state.y, state.vx, state.vy,
+        state.facingRight and 1 or 0,
+        state.aimX, state.aimY,
+        state.isDashing and 1 or 0,
+        state.dashDir or 0
+    )
+    Network.sendRaw(encoded, false)
 end
 
 function applyGameState(data)
@@ -1905,7 +2146,11 @@ function applyGameState(data)
             facingRight = (data.facing == 1),
             armor = data.armor,
             damageBoost = data.dmgBoost,
-            damageBoostShots = data.dmgShots
+            damageBoostShots = data.dmgShots,
+            aimX = data.aimX,
+            aimY = data.aimY,
+            isDashing = (data.dash == 1),
+            dashDir = data.dashDir
         })
     else
         -- Local player: only apply authoritative life/buffs from host
@@ -1966,16 +2211,17 @@ function drawGameOver(W, H)
     love.graphics.rectangle("fill", 0, 0, W, H)
 
 	love.graphics.setFont(getFont(56))
-    love.graphics.setColor(1, 1, 0.3)
     if winner and winner > 0 then
-        love.graphics.printf("Player " .. winner .. " Wins!", 0, H / 2 - 60, W, "center")
+        love.graphics.setColor(1, 1, 0.3)
+        DrawSharpText("Player " .. winner .. " Wins!", 0, H / 2 - 60, W, "center")
     else
-        love.graphics.printf("Draw!", 0, H / 2 - 60, W, "center")
+        love.graphics.setColor(0.8, 0.8, 0.8)
+        DrawSharpText("Draw!", 0, H / 2 - 60, W, "center")
     end
 
 	love.graphics.setFont(getFont(20))
     love.graphics.setColor(1, 1, 1, 0.7)
-    love.graphics.printf("Press R to restart", 0, H / 2 + 20, W, "center")
+    DrawSharpText("Press R to restart", 0, H / 2 + 20, W, "center")
 end
 
 -- ─────────────────────────────────────────────
@@ -1992,6 +2238,8 @@ function returnToMenu()
     Abilities.clear()
     Lightning.reset()
     Dropbox.reset()
+    Saw.reset()
+    Pacman.reset()
     gameState = "menu"
     menuStatus = ""
     menuChoice = 1
@@ -2007,6 +2255,31 @@ function getLocalPlayer()
     if demoMode then return players[1] end
     local pid = Network.getLocalPlayerId()
     return players[pid]
+end
+
+local function restoreSelectionConnections(prevConnected)
+    if not selection then return end
+    if prevConnected then
+        for i = 1, maxPlayers do
+            if prevConnected[i] then
+                selection:setConnected(i, true)
+            end
+        end
+    end
+    local localPid = Network.getLocalPlayerId()
+    if localPid and localPid >= 1 and localPid <= maxPlayers then
+        selection:setConnected(localPid, true)
+    end
+end
+
+local function broadcastSelectionStatusSnapshot()
+    if Network.getRole() ~= Network.ROLE_HOST or not selection then return end
+    for i = 1, maxPlayers do
+        Network.send("player_status", {
+            pid = i,
+            connected = selection.connected[i] == true
+        }, true)
+    end
 end
 
 function restartGame()
@@ -2031,12 +2304,43 @@ function restartGame()
         Abilities.clear()
         Lightning.reset()
         Dropbox.reset()
-        selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
-        gameState = "selection"
-        -- Host tells clients to restart
-        if Network.getRole() == Network.ROLE_HOST then
-            Network.send("game_restart", {}, true)
+        Saw.reset()
+        Pacman.reset()
+        networkSyncTimer = 0
+
+        -- Preserve player names across restart
+        local savedNames = {}
+        for i = 1, maxPlayers do
+            if players[i] and players[i].name then
+                savedNames[i] = players[i].name
+            end
         end
+        for i = 1, maxPlayers do
+            if players[i] then
+                players[i]:setShape(nil)
+                players[i].life = 0
+                if savedNames[i] then
+                    players[i].name = savedNames[i]
+                end
+            end
+        end
+
+        local prevConnected = selection and selection.connected or nil
+        selection = Selection.new(Network.getLocalPlayerId(), maxPlayers)
+        restoreSelectionConnections(prevConnected)
+
+        if Network.getRole() == Network.ROLE_HOST then
+            if not serverMode then
+                selection:setConnected(1, true)
+            end
+            for pid, _ in pairs(Network.getConnectedPeers()) do
+                selection:setConnected(pid, true)
+            end
+            Network.send("game_restart", {}, true)
+            broadcastSelectionStatusSnapshot()
+        end
+
+        gameState = "selection"
     end
 end
 
@@ -2173,6 +2477,8 @@ function startDemoMode()
     gameState = "countdown"
     Lightning.reset()
     Dropbox.reset()
+    Saw.reset()
+    Pacman.reset()
 
     -- Initialize camera to correct position immediately
     initCamera(players)
@@ -2185,11 +2491,16 @@ function restartDemoMode()
     Abilities.clear()
     Lightning.reset()
     Dropbox.reset()
+    Saw.reset()
+    Pacman.reset()
     startDemoMode()
 end
 
 -- Update demo mode (called from love.update when demoMode is true)
 function updateDemoMode(dt)
+    -- Update map (platform animation)
+    Map.update(dt)
+
     -- Update all players
     for _, p in ipairs(players) do
         if p.life > 0 then
@@ -2198,6 +2509,14 @@ function updateDemoMode(dt)
             if p:consumeLanding() then
                 Sounds.play("land")
                 Projectiles.spawnLandingDust(p.x, p.y + p.shapeHeight / 2)
+            end
+            -- Apply fall damage (demo mode is always authoritative)
+            local fallDamage = p:consumeFallDamage()
+            if fallDamage > 0 then
+                p.life = p.life - fallDamage
+                spawnDamageNumber(p.x, p.y - p.shapeHeight/2, fallDamage)
+                Sounds.play("hit")
+                addScreenShake(2, 0.1, 10)
             end
         end
     end
@@ -2238,6 +2557,12 @@ function updateDemoMode(dt)
     -- Update dropboxes
     Dropbox.update(dt, players)
 
+    -- Update saws
+    Saw.update(dt, players)
+
+    -- Update pacman monsters
+    Pacman.update(dt, players)
+
     -- Check for player deaths (explosion effect)
     for _, p in ipairs(players) do
         p:checkDeath(dt)
@@ -2254,8 +2579,8 @@ function updateDemoMode(dt)
     local localPlayer = players[1]  -- In demo mode, P1 is always local
     if localPlayer and localPlayer.life > 0 then
         local mx, my = love.mouse.getPosition()
-        local gameX = (mx - offsetX) / scaleX
-        local gameY = (my - offsetY) / scaleY
+        local gameX = (mx - offsetX) / GLOBAL_SCALE
+        local gameY = (my - offsetY) / GLOBAL_SCALE
         local W, H = GAME_WIDTH, GAME_HEIGHT
         local worldX = (gameX - W/2) / cameraZoom + W/2 + cameraX
         local worldY = (gameY - H/2) / cameraZoom + H/2 + cameraY
@@ -2265,4 +2590,135 @@ function updateDemoMode(dt)
 
     -- Check for game over
     checkGameOver()
+end
+
+-- ─────────────────────────────────────────────
+-- Mouse handling
+-- ─────────────────────────────────────────────
+function love.mousemoved(x, y, dx, dy, istouch)
+    -- Normalize coordinates
+    local gx, gy = windowToGame(x, y)
+    local W, H = GAME_WIDTH, GAME_HEIGHT
+
+    if gameState == "menu" then
+        -- Menu items centered, verify coordinates from drawMenu
+        local menuY = 240
+        local itemHeight = 50
+        local menuWidth = 400 -- clickable area width
+        local menuX = (W - menuWidth) / 2
+        
+        for i = 1, 4 do
+            local itemY = menuY + (i - 1) * itemHeight
+            -- Check if mouse is roughly over the text item
+            if isMouseOver(gx, gy, menuX, itemY, menuWidth, itemHeight) then
+                if menuChoice ~= i then
+                    menuChoice = i
+                    Sounds.play("menu_nav")
+                end
+            end
+        end
+
+    elseif gameState == "settings" then
+        if settingsEditingName then return end
+
+        -- Grid layout parameters from drawSettings
+        local colWidth = 320
+        local leftColX = W/2 - colWidth - 40
+        local rightColX = W/2 + 40
+        local startY = 100
+        local rowHeight = 115
+        local maxRows = 4
+        
+        -- Check left column
+        for r = 1, maxRows do
+            local cellX = leftColX
+            local cellY = startY + (r - 1) * rowHeight
+            -- The box is drawn at x-10, y-8 with size colWidth+20, rowHeight-20
+            if isMouseOver(gx, gy, cellX - 10, cellY - 8, colWidth + 20, rowHeight - 20) then
+                if settingsCol ~= 1 or settingsRow ~= r then
+                    settingsCol = 1
+                    settingsRow = r
+                    Sounds.play("menu_nav")
+                end
+            end
+        end
+        
+        -- Check right column
+        for r = 1, 3 do -- only 3 rows in right column
+            local cellX = rightColX
+            local cellY = startY + (r - 1) * rowHeight
+             if isMouseOver(gx, gy, cellX - 10, cellY - 8, colWidth + 20, rowHeight - 20) then
+                if settingsCol ~= 2 or settingsRow ~= r then
+                    settingsCol = 2
+                    settingsRow = r
+                    Sounds.play("menu_nav")
+                end
+            end
+        end
+    end
+end
+
+function love.mousepressed(x, y, button, istouch, presses)
+    if button == 1 then
+        -- Left click behaviors
+        if gameState == "menu" then
+            local gx, gy = windowToGame(x, y)
+            local W, H = GAME_WIDTH, GAME_HEIGHT
+            local menuY = 240
+            local itemHeight = 50
+            local menuWidth = 400
+            local menuX = (W - menuWidth) / 2
+            
+            local clickedItem = nil
+            for i = 1, 4 do
+                local itemY = menuY + (i - 1) * itemHeight
+                if isMouseOver(gx, gy, menuX, itemY, menuWidth, itemHeight) then
+                    clickedItem = i
+                    break
+                end
+            end
+            
+            if clickedItem and clickedItem == menuChoice then
+                handleMenuKey("return")
+            end
+
+        elseif gameState == "settings" then
+             -- Similarly for settings
+            if settingsEditingName then
+                -- Check if we clicked outside to stop editing?
+                 return
+            end
+
+            local gx, gy = windowToGame(x, y)
+            local W, H = GAME_WIDTH, GAME_HEIGHT
+            local colWidth = 320
+            local leftColX = W/2 - colWidth - 40
+            local rightColX = W/2 + 40
+            local startY = 100
+            local rowHeight = 115
+            
+            -- Check if clicked on current selection
+            local clicked = false
+            -- Left col
+            if settingsCol == 1 then
+                local r = settingsRow
+                local cellX = leftColX
+                local cellY = startY + (r - 1) * rowHeight
+                if isMouseOver(gx, gy, cellX - 10, cellY - 8, colWidth + 20, rowHeight - 20) then
+                    clicked = true
+                end
+            elseif settingsCol == 2 then
+                local r = settingsRow
+                local cellX = rightColX
+                local cellY = startY + (r - 1) * rowHeight
+                if isMouseOver(gx, gy, cellX - 10, cellY - 8, colWidth + 20, rowHeight - 20) then
+                    clicked = true
+                end
+            end
+            
+            if clicked then
+                handleSettingsKey("return")
+            end
+        end
+    end
 end

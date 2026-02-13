@@ -241,6 +241,7 @@ end
 local CHARGE_TYPES = { "health", "health", "armor", "damage" }  -- health is more common
 
 function Dropbox._spawnCharge(x, y)
+    if #CHARGE_TYPES == 0 then return end  -- Safety check
     local kind = CHARGE_TYPES[math.random(#CHARGE_TYPES)]
     local charge = {
         x = x,
@@ -262,6 +263,21 @@ function Dropbox._playerTouchesCharge(player, charge)
            py < charge.y + halfCharge and py + ph > charge.y - halfCharge
 end
 
+local FONT_PATH = "assets/fonts/FredokaOne-Regular.ttf"
+local _dropboxFont
+
+local function getDropboxFont()
+    if not _dropboxFont then
+        local scale = GLOBAL_SCALE or 1
+        _dropboxFont = love.graphics.newFont(FONT_PATH, math.floor(20 * scale))
+    end
+    return _dropboxFont
+end
+
+function Dropbox.clearFontCache()
+    _dropboxFont = nil
+end
+
 function Dropbox.draw()
     -- Draw boxes
     for _, box in ipairs(boxes) do
@@ -277,7 +293,9 @@ function Dropbox.draw()
         love.graphics.line(box.x, box.y - halfSize, box.x, box.y + halfSize)
         -- Question mark
         love.graphics.setColor(1, 1, 0.3, 0.9)
-        love.graphics.printf("?", box.x - halfSize, box.y - 8, Dropbox.BOX_SIZE, "center")
+        
+        love.graphics.setFont(getDropboxFont())
+        DrawSharpText("?", box.x - halfSize, box.y - 8, Dropbox.BOX_SIZE, "center")
     end
 
     -- Draw charges (health / armor / damage)

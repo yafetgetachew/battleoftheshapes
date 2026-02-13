@@ -333,10 +333,6 @@ function Abilities.update(dt, players)
                     -- Only update if aim vector is significant (avoid jitter at 0,0)
                     if p.aimX ~= 0 or p.aimY ~= 0 then
                         laser.angle = math.atan2(p.aimY - p.y, p.aimX - p.x)
-                        -- DEBUG: Print updated angle
-                        if math.random() < 0.01 then
-                            print("Abilities: Laser owner " .. p.id .. " aim " .. math.floor(p.aimX) .. "," .. math.floor(p.aimY) .. " -> angle " .. laser.angle)
-                        end
                     end
                 end
                 break
@@ -354,50 +350,52 @@ function Abilities.update(dt, players)
                 end
             end
 
-            -- Check collision with players (damage with cooldown)
-            for _, player in ipairs(players) do
-                if player.id ~= laser.owner and (player.life or 0) > 0 then
-                    -- Check if player is near laser line segment
-                    local px, py = player.x, player.y
-                    local lx1, ly1 = laser.x, laser.y
-                    local lx2 = lx1 + math.cos(laser.angle) * laser.width
-                    local ly2 = ly1 + math.sin(laser.angle) * laser.width
+            -- Only authority resolves laser hits and spark effects.
+            if isAuthority then
+                for _, player in ipairs(players) do
+                    if player.id ~= laser.owner and (player.life or 0) > 0 then
+                        -- Check if player is near laser line segment
+                        local px, py = player.x, player.y
+                        local lx1, ly1 = laser.x, laser.y
+                        local lx2 = lx1 + math.cos(laser.angle) * laser.width
+                        local ly2 = ly1 + math.sin(laser.angle) * laser.width
 
-                    -- Point to line segment distance
-                    local l2 = (lx2 - lx1)^2 + (ly2 - ly1)^2
-                    if l2 == 0 then l2 = 0.0001 end
-                    local t = ((px - lx1) * (lx2 - lx1) + (py - ly1) * (ly2 - ly1)) / l2
-                    t = math.max(0, math.min(1, t))
-                    local projX = lx1 + t * (lx2 - lx1)
-                    local projY = ly1 + t * (ly2 - ly1)
-                    local distSq = (px - projX)^2 + (py - projY)^2
-                    
-                    -- Player radius estimate (use max dimension for generous hit detection)
-                    local pRadius = math.max(player.shapeWidth, player.shapeHeight) / 2
-                    local laserRadius = laser.height / 2
+                        -- Point to line segment distance
+                        local l2 = (lx2 - lx1)^2 + (ly2 - ly1)^2
+                        if l2 == 0 then l2 = 0.0001 end
+                        local t = ((px - lx1) * (lx2 - lx1) + (py - ly1) * (ly2 - ly1)) / l2
+                        t = math.max(0, math.min(1, t))
+                        local projX = lx1 + t * (lx2 - lx1)
+                        local projY = ly1 + t * (ly2 - ly1)
+                        local distSq = (px - projX)^2 + (py - projY)^2
 
-                    if distSq < (pRadius + laserRadius)^2 then
-                        -- Apply 1 damage per tick, with 1/30th second cooldown (~30 ticks per second = 30 damage/sec)
-                        if not laser.hitCooldown[player.id] then
-                            -- Hit direction based on laser angle
-                            local hitDir = math.cos(laser.angle) > 0 and 1 or -1
-                            applyDamage(player, laser.damagePerHit, hitDir, isAuthority)
-                            laser.hitCooldown[player.id] = 0.033  -- ~30 damage per second
+                        -- Player radius estimate (use max dimension for generous hit detection)
+                        local pRadius = math.max(player.shapeWidth, player.shapeHeight) / 2
+                        local laserRadius = laser.height / 2
 
-                            -- Spawn flying sparks at hit point
-                            for _ = 1, math.random(3, 5) do
-                                table.insert(activeSparks, {
-                                    x = projX,
-                                    y = projY,
-                                    vx = (math.random() - 0.5) * 300 + hitDir * 100,
-                                    vy = -math.random() * 200 - 50,
-                                    age = 0,
-                                    maxAge = 0.3 + math.random() * 0.3,
-                                    r = 1.0,
-                                    g = 0.5 + math.random() * 0.4,
-                                    b = 0.1 + math.random() * 0.2,
-                                    size = 2 + math.random() * 3,
-                                })
+                        if distSq < (pRadius + laserRadius)^2 then
+                            -- Apply 1 damage per tick, with 1/30th second cooldown (~30 ticks per second = 30 damage/sec)
+                            if not laser.hitCooldown[player.id] then
+                                -- Hit direction based on laser angle
+                                local hitDir = math.cos(laser.angle) > 0 and 1 or -1
+                                applyDamage(player, laser.damagePerHit, hitDir, true)
+                                laser.hitCooldown[player.id] = 0.033  -- ~30 damage per second
+
+                                -- Spawn flying sparks at hit point
+                                for _ = 1, math.random(3, 5) do
+                                    table.insert(activeSparks, {
+                                        x = projX,
+                                        y = projY,
+                                        vx = (math.random() - 0.5) * 300 + hitDir * 100,
+                                        vy = -math.random() * 200 - 50,
+                                        age = 0,
+                                        maxAge = 0.3 + math.random() * 0.3,
+                                        r = 1.0,
+                                        g = 0.5 + math.random() * 0.4,
+                                        b = 0.1 + math.random() * 0.2,
+                                        size = 2 + math.random() * 3,
+                                    })
+                                end
                             end
                         end
                     end
